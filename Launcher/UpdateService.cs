@@ -203,7 +203,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
         client.DefaultRequestHeaders.UserAgent.Add(
-            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.1"));
+            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.2"));
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
