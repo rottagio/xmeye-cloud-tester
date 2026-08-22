@@ -22,7 +22,8 @@ internal static class UpdateService
 
     private static readonly HttpClient Http = CreateClient();
 
-    internal static async Task<UpdateResult> CheckAndOfferAsync(string installDirectory)
+    internal static async Task<UpdateResult> CheckAndOfferAsync(
+        string installDirectory, bool manualCheck = false, int waitPid = 0)
     {
         if (RepositoryOwner.StartsWith("__", StringComparison.Ordinal))
             return UpdateResult.None;
@@ -32,7 +33,17 @@ internal static class UpdateService
             ReleaseInfo? release = await GetLatestReleaseAsync();
             Version current = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
             if (release is null || release.Version <= current)
+            {
+                if (manualCheck)
+                {
+                    MessageBox.Show(
+                        $"Voce ja esta usando a versao mais recente ({current.Major}.{current.Minor}.{current.Build}).",
+                        "Atualizacao do XMEye Cloud Tester",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
                 return UpdateResult.None;
+            }
 
             DialogResult answer = MessageBox.Show(
                 $"A versao {release.Version} esta disponivel.\n\n" +
@@ -54,7 +65,8 @@ internal static class UpdateService
             VerifyDigest(zipPath, release.Digest);
             ExtractSafely(zipPath, stagingDirectory);
             ValidateUpdate(stagingDirectory);
-            StartInstallerScript(workDirectory, stagingDirectory, installDirectory);
+            StartInstallerScript(
+                workDirectory, stagingDirectory, installDirectory, waitPid, release.Version);
             return UpdateResult.Installing;
         }
         catch (Exception ex)
@@ -152,17 +164,23 @@ internal static class UpdateService
     }
 
     private static void StartInstallerScript(
-        string workDirectory, string stagingDirectory, string installDirectory)
+        string workDirectory, string stagingDirectory, string installDirectory,
+        int waitPid, Version version)
     {
         string scriptPath = Path.Combine(workDirectory, "install-update.ps1");
         File.WriteAllText(scriptPath, """
 param(
-    [Parameter(Mandatory=$true)][int]$ProcessId,
+    [Parameter(Mandatory=$true)][int]$LauncherProcessId,
+    [int]$AppProcessId = 0,
+    [Parameter(Mandatory=$true)][string]$Version,
     [Parameter(Mandatory=$true)][string]$Source,
     [Parameter(Mandatory=$true)][string]$Destination
 )
 $ErrorActionPreference = 'Stop'
-Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue
+Wait-Process -Id $LauncherProcessId -ErrorAction SilentlyContinue
+if ($AppProcessId -gt 0) {
+    Wait-Process -Id $AppProcessId -ErrorAction SilentlyContinue
+}
 Start-Sleep -Milliseconds 400
 $sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd('\\') + '\\'
 Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
@@ -174,7 +192,7 @@ Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
     }
     Copy-Item -LiteralPath $_.FullName -Destination $target -Force
 }
-Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
+Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList @('--skip-update', "--updated=$Version") -WorkingDirectory $Destination
 Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 """);
@@ -190,8 +208,12 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-File");
         startInfo.ArgumentList.Add(scriptPath);
-        startInfo.ArgumentList.Add("-ProcessId");
+        startInfo.ArgumentList.Add("-LauncherProcessId");
         startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+        startInfo.ArgumentList.Add("-AppProcessId");
+        startInfo.ArgumentList.Add(waitPid.ToString());
+        startInfo.ArgumentList.Add("-Version");
+        startInfo.ArgumentList.Add($"{version.Major}.{version.Minor}.{version.Build}");
         startInfo.ArgumentList.Add("-Source");
         startInfo.ArgumentList.Add(stagingDirectory);
         startInfo.ArgumentList.Add("-Destination");
@@ -203,7 +225,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
         client.DefaultRequestHeaders.UserAgent.Add(
-            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.2"));
+            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.3"));
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");

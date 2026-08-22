@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -40,6 +41,8 @@ public partial class MainWindow : Window
         File.WriteAllText(diagnosticPath, string.Empty);
         sdkCallback = OnSdkMessage;
         InitializeComponent();
+        Version version = typeof(MainWindow).Assembly.GetName().Version ?? new Version(0, 0);
+        VersionText.Text = $"Versao {version.Major}.{version.Minor}.{version.Build}";
         VideoHost.Child = videoPanel;
         Loaded += OnLoaded;
         Closing += OnClosing;
@@ -397,6 +400,32 @@ public partial class MainWindow : Window
             lock (diagnosticLock) File.AppendAllText(diagnosticPath, line);
         }
         catch { }
+    }
+
+    private void CheckUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            string baseDirectory = AppContext.BaseDirectory;
+            string launcher = Path.Combine(baseDirectory, "XMEyeCloudTester.exe");
+            if (!File.Exists(launcher))
+                throw new FileNotFoundException("O atualizador nao foi encontrado.", launcher);
+
+            var startInfo = new ProcessStartInfo(launcher)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = baseDirectory
+            };
+            startInfo.ArgumentList.Add("--manual-update");
+            startInfo.ArgumentList.Add($"--wait-pid={Environment.ProcessId}");
+            Process.Start(startInfo);
+            System.Windows.Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show("Nao foi possivel abrir o atualizador.\n\n" + ex.Message,
+                "Atualizacao", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void CopyLog_Click(object sender, RoutedEventArgs e) => System.Windows.Clipboard.SetText(LogBox.Text);

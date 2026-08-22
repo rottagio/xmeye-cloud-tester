@@ -20,6 +20,15 @@
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel>
           <TextBlock Text="Sua conta XMEye/iCSee" Foreground="White" FontSize="23" FontWeight="SemiBold"/>
+          <Grid Margin="0,8,0,12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="VersionText" Foreground="#91A4C3" VerticalAlignment="Center"/>
+            <Button Grid.Column="1" Content="VERIFICAR ATUALIZACAO" Padding="10,5"
+                    Click="CheckUpdate_Click"/>
+          </Grid>
           <TextBlock Text="Entre uma vez e escolha uma das câmeras vinculadas."
                      Foreground="#91A4C3" Margin="0,5,0,22" TextWrapping="Wrap"/>
 
