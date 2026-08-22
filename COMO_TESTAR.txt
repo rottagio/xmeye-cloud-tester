@@ -1,0 +1,23 @@
+XMEYE CLOUD TESTER — LOGIN POR CONTA
+
+1. Extraia TODO o ZIP para uma pasta.
+2. Abra XMEyeCloudTester.exe.
+3. Digite o e-mail/usuário e a senha usados no aplicativo iCSee/XMEye.
+4. Digite os quatro caracteres mostrados na imagem de verificação.
+5. Clique em ENTRAR E CARREGAR CÂMERAS.
+6. Escolha uma câmera na lista retornada pela conta.
+7. Mantenha “Usar fluxo leve (SD)” marcado no primeiro teste.
+8. Clique em ABRIR CÂMERA SELECIONADA.
+
+O login usa o serviço HTTPS atual em api.xmeye.net. A imagem de verificação é
+obrigatória nesse serviço e pode ser renovada pelo botão “Trocar imagem”.
+
+SEGURANÇA
+- A senha da conta não é salva em arquivo, banco ou log.
+- O token de sessão e o código da imagem ficam somente na memória.
+- As credenciais internas retornadas para as câmeras ficam somente na memória.
+- O diagnóstico não imprime e-mail, senha, serial ou credenciais de dispositivo.
+- Use “SAIR E LIMPAR DADOS DA CONTA” para remover os dados da sessão da memória.
+
+Se o teste falhar, clique em Copiar e envie somente o diagnóstico exibido.
+O pacote contém componentes oficiais do VMS XMEye; não o redistribua publicamente.

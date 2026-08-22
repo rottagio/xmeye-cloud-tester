@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>XMEyeCloudTester.App</AssemblyName>
+    <RootNamespace>XMEyeCloudTester</RootNamespace>
+    <Version>0.8.1</Version>
+    <AssemblyVersion>0.8.1.0</AssemblyVersion>
+    <FileVersion>0.8.1.0</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Launcher\**\*.cs" />
+    <None Remove="Launcher\**\*" />
+    <None Include="COMO_TESTAR.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="LEIA-ME.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

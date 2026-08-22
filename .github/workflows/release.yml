@@ -1,0 +1,38 @@
+name: Publicar atualizacao
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Obter codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Compilar e montar pacote incremental
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          dotnet build .\Launcher\XMEyeCloudTester.Launcher.csproj -c Release -p:Version=$version -p:AssemblyVersion="$version.0" -p:FileVersion="$version.0"
+          dotnet build .\XMEyeCloudTester.csproj -c Release -p:Version=$version -p:AssemblyVersion="$version.0" -p:FileVersion="$version.0"
+          New-Item -ItemType Directory -Path .\release-patch | Out-Null
+          Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.dll .\release-patch\
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.dll .\release-patch\
+          Compress-Archive -Path .\release-patch\* -DestinationPath .\XMEyeCloudTester-update.zip
+
+      - name: Criar Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" .\XMEyeCloudTester-update.zip --generate-notes --title "XMEye Cloud Tester ${{ github.ref_name }}"

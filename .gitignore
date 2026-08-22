@@ -1,0 +1,17 @@
+bin/
+obj/
+Launcher/bin/
+Launcher/obj/
+publish/
+package/
+*.zip
+*.log
+*.user
+.vs/
+
+# Bibliotecas oficiais proprietarias ficam apenas no pacote local.
+vendor/
+official-runtime/
+*.dll
+*.exe
+*.pdb
