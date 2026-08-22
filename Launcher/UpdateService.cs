@@ -177,24 +177,52 @@ param(
     [Parameter(Mandatory=$true)][string]$Destination
 )
 $ErrorActionPreference = 'Stop'
-Wait-Process -Id $LauncherProcessId -ErrorAction SilentlyContinue
-if ($AppProcessId -gt 0) {
-    Wait-Process -Id $AppProcessId -ErrorAction SilentlyContinue
+$logDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'XMEyeCloudAccountTester'
+New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+$logPath = Join-Path $logDirectory 'update.log'
+function Write-UpdateLog([string]$Message) {
+    Add-Content -LiteralPath $logPath -Value ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $Message)
 }
-Start-Sleep -Milliseconds 400
-$sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd('\\') + '\\'
-Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
-    $relative = $_.FullName.Substring($sourceRoot.Length)
-    $target = Join-Path $Destination $relative
-    $parent = Split-Path -Parent $target
-    if (-not (Test-Path -LiteralPath $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+
+try {
+    Write-UpdateLog "Inicio da instalacao $Version. Destino: $Destination"
+    Wait-Process -Id $LauncherProcessId -ErrorAction SilentlyContinue
+    if ($AppProcessId -gt 0) {
+        Wait-Process -Id $AppProcessId -ErrorAction SilentlyContinue
     }
-    Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+    Start-Sleep -Milliseconds 500
+
+    $sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd('\\') + '\\'
+    Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($sourceRoot.Length)
+        $target = Join-Path $Destination $relative
+        $parent = Split-Path -Parent $target
+        if (-not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        [IO.File]::Copy($_.FullName, $target, $true)
+        $sourceHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($sourceHash -ne $targetHash) {
+            throw "A verificacao do arquivo $relative falhou."
+        }
+        Write-UpdateLog "Arquivo confirmado: $relative ($targetHash)"
+    }
+
+    Write-UpdateLog "Instalacao $Version concluida."
+    Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList @('--skip-update', "--updated=$Version") -WorkingDirectory $Destination
+    Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
-Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList @('--skip-update', "--updated=$Version") -WorkingDirectory $Destination
-Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+catch {
+    Write-UpdateLog "ERRO: $($_.Exception.Message)"
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show(
+        "A atualizacao falhou. O detalhe foi salvo em:`n$logPath`n`n$($_.Exception.Message)",
+        'Atualizacao do XMEye Cloud Tester', 'OK', 'Error') | Out-Null
+    Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
+    exit 1
+}
 """);
 
         var startInfo = new ProcessStartInfo("powershell.exe")
@@ -225,7 +253,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
         client.DefaultRequestHeaders.UserAgent.Add(
-            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.3"));
+            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.4"));
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
