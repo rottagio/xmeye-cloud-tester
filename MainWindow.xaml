@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
-        Title="XMEye Cloud — Conta HTTPS" Width="1120" Height="760"
+        Title="XMEye Cloud — Login por QR" Width="1120" Height="760"
         MinWidth="960" MinHeight="680"
         WindowStartupLocation="CenterScreen" Background="#0B1220">
   <Grid Margin="22">
@@ -29,9 +29,25 @@
             <Button Grid.Column="1" Content="VERIFICAR ATUALIZACAO" Padding="10,5"
                     Click="CheckUpdate_Click"/>
           </Grid>
-          <TextBlock Text="Entre uma vez e escolha uma das câmeras vinculadas."
+          <TextBlock Text="Escaneie o QR no aplicativo XMEye/iCSee para carregar suas câmeras."
                      Foreground="#91A4C3" Margin="0,5,0,22" TextWrapping="Wrap"/>
 
+          <Border Background="White" CornerRadius="8" Padding="10" Width="250" Height="250"
+                  HorizontalAlignment="Center">
+            <Grid>
+              <Image x:Name="QrImage" Stretch="Uniform"/>
+              <TextBlock x:Name="QrStatusText" Text="Gerando QR..." Foreground="#44536A"
+                         TextAlignment="Center" TextWrapping="Wrap" MaxWidth="190"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+          </Border>
+          <TextBlock Text="Abra o XMEye ou iCSee no celular e use a opção de escanear QR. Não digite sua senha neste computador."
+                     Foreground="#CAD6E8" TextWrapping="Wrap" Margin="0,12,0,10"/>
+          <Button x:Name="RefreshQrButton" Content="GERAR NOVO QR" Height="40"
+                  Background="#2D6CDF" Foreground="White" FontWeight="SemiBold"
+                  BorderThickness="0" Click="RefreshQr_Click"/>
+
+          <StackPanel Visibility="Collapsed">
           <TextBlock Text="E-mail ou usuário da conta" Foreground="#CAD6E8"/>
           <TextBox x:Name="AccountBox" Margin="0,6,0,14" Padding="10" FontSize="15"/>
           <TextBlock Text="Senha da conta" Foreground="#CAD6E8"/>
@@ -58,6 +74,7 @@
           <Button x:Name="AccountLoginButton" Content="ENTRAR E CARREGAR CÂMERAS" Height="44"
                   Background="#2D6CDF" Foreground="White" FontWeight="SemiBold"
                   BorderThickness="0" IsEnabled="False" Click="AccountLogin_Click"/>
+          </StackPanel>
 
           <Separator Margin="0,20,0,18" Background="#30415B"/>
           <TextBlock Text="Câmera" Foreground="#CAD6E8"/>
@@ -79,7 +96,7 @@
           <Button x:Name="ForgetAccountButton" Content="SAIR E LIMPAR DADOS DA CONTA" Height="38"
                   Margin="0,10,0,0" IsEnabled="False" Click="ForgetAccount_Click"/>
 
-          <TextBlock Text="O código acima é exigido pelo serviço oficial atual. A senha da conta e as credenciais internas das câmeras ficam somente na memória. Nada disso é salvo nem incluído no diagnóstico."
+          <TextBlock Text="O QR usa o fluxo oficial atual do VMS Pro. Tokens e credenciais internas das câmeras ficam somente na memória e nunca aparecem no diagnóstico."
                      Foreground="#7890B2" TextWrapping="Wrap" Margin="0,20,0,0" FontSize="12"/>
         </StackPanel>
       </ScrollViewer>

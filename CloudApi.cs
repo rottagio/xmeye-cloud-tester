@@ -81,6 +81,11 @@ internal static class CloudApi
         if (accessToken.Length == 0)
             throw new InvalidOperationException("O login cloud não retornou um token de sessão.");
 
+        return await GetDevicesByAccessTokenAsync(accessToken).ConfigureAwait(false);
+    }
+
+    internal static async Task<IReadOnlyList<AccountDevice>> GetDevicesByAccessTokenAsync(string accessToken)
+    {
         string listJson = JsonSerializer.Serialize(new { Authorization = accessToken });
         using var listRequest = NewJsonRequest(HttpMethod.Post, "transfer/mdlist/v1", listJson);
         listRequest.Headers.TryAddWithoutValidation("Access-Token", accessToken);

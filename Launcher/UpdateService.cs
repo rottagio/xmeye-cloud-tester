@@ -157,10 +157,16 @@ internal static class UpdateService
 
     private static void ValidateUpdate(string stagingDirectory)
     {
-        string launcher = Path.Combine(stagingDirectory, "XMEyeCloudTester.dll");
-        string application = Path.Combine(stagingDirectory, "XMEyeCloudTester.App.dll");
-        if (!File.Exists(launcher) || !File.Exists(application))
-            throw new InvalidDataException("O pacote nao contem os dois modulos obrigatorios do aplicativo.");
+        string[] requiredFiles =
+        [
+            "XMEyeCloudTester.dll",
+            "XMEyeCloudTester.App.dll",
+            "XMEyeCloudTester.App.deps.json",
+            "QRCoder.dll",
+            "XMEyeBridge.dll"
+        ];
+        if (requiredFiles.Any(file => !File.Exists(Path.Combine(stagingDirectory, file))))
+            throw new InvalidDataException("O pacote nao contem todos os modulos obrigatorios do aplicativo.");
     }
 
     private static void StartInstallerScript(
@@ -253,7 +259,7 @@ catch {
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
         client.DefaultRequestHeaders.UserAgent.Add(
-            new ProductInfoHeaderValue("XMEyeCloudTester", "0.8.4"));
+            new ProductInfoHeaderValue("XMEyeCloudTester", "0.9.0"));
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");

@@ -30,6 +30,8 @@ public partial class MainWindow : Window
     private bool cloudReady;
     private bool captchaBusy;
     private string captchaToken = string.Empty;
+    private CancellationTokenSource? qrLoginCts;
+    private bool qrBusy;
 
     public MainWindow()
     {
@@ -52,7 +54,7 @@ public partial class MainWindow : Window
     {
         InitializeSdk();
         if (sdkReady)
-            await RefreshCaptchaAsync();
+            await RefreshQrAsync();
     }
 
     private void InitializeSdk()
@@ -92,7 +94,7 @@ public partial class MainWindow : Window
             }
             finally { Marshal.FreeHGlobal(cloudIp); }
 
-            Log("Motor pronto. Carregando o login HTTPS atual da conta XMEye/iCSee...");
+            Log("Motor pronto. Carregando o login oficial por QR da conta XMEye/iCSee...");
         }
         catch (DllNotFoundException ex)
         {
@@ -110,6 +112,114 @@ public partial class MainWindow : Window
             DisableAccountLogin();
         }
     }
+
+    private async void RefreshQr_Click(object sender, RoutedEventArgs e) =>
+        await RefreshQrAsync();
+
+    private async Task RefreshQrAsync()
+    {
+        if (!sdkReady || qrBusy)
+            return;
+
+        qrLoginCts?.Cancel();
+        qrLoginCts?.Dispose();
+        qrLoginCts = new CancellationTokenSource();
+        CancellationToken cancellationToken = qrLoginCts.Token;
+        qrBusy = true;
+        RefreshQrButton.IsEnabled = false;
+        QrImage.Source = null;
+        QrStatusText.Text = "Gerando QR oficial...";
+        QrStatusText.Visibility = Visibility.Visible;
+
+        try
+        {
+            QrCloudApi.Challenge challenge = await Task.Run(QrCloudApi.CreateChallenge, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            QrImage.Source = LoadImage(QrCloudApi.RenderQr(challenge.QrUrl));
+            QrStatusText.Visibility = Visibility.Collapsed;
+            Log("QR oficial carregado. Escaneie pelo aplicativo XMEye/iCSee no celular.");
+            _ = PollQrLoginAsync(challenge, cancellationToken);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            QrStatusText.Text = "Não foi possível gerar o QR. Clique em GERAR NOVO QR.";
+            Log("FALHA AO GERAR O QR OFICIAL: " + SafeQrError(ex));
+        }
+        finally
+        {
+            qrBusy = false;
+            RefreshQrButton.IsEnabled = sdkReady;
+        }
+    }
+
+    private async Task PollQrLoginAsync(QrCloudApi.Challenge challenge, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(1000, cancellationToken);
+                QrCloudApi.PollResult status = await Task.Run(
+                    () => QrCloudApi.Poll(challenge.Token), cancellationToken);
+
+                if (status.Expired || status.Limited)
+                {
+                    QrImage.Source = null;
+                    QrStatusText.Text = status.Limited
+                        ? "Muitas consultas. Gere um novo QR em instantes."
+                        : "Este QR expirou. Clique em GERAR NOVO QR.";
+                    QrStatusText.Visibility = Visibility.Visible;
+                    Log(status.Limited ? "QR temporariamente limitado." : "QR expirado.");
+                    return;
+                }
+
+                if (!status.Completed)
+                    continue;
+
+                QrStatusText.Text = "Conta vinculada. Carregando câmeras...";
+                QrStatusText.Visibility = Visibility.Visible;
+                QrImage.Source = null;
+                IReadOnlyList<CloudApi.AccountDevice> devices =
+                    await CloudApi.GetDevicesByAccessTokenAsync(status.AccessToken);
+                ClearAccountDevices();
+                accountDevices.AddRange(devices);
+                DeviceBox.ItemsSource = accountDevices;
+                DeviceBox.IsEnabled = accountDevices.Count > 0;
+                ForgetAccountButton.IsEnabled = true;
+                if (accountDevices.Count > 0)
+                {
+                    DeviceBox.SelectedIndex = 0;
+                    QrStatusText.Text = "Conta conectada.";
+                    Log($"Conta autenticada pelo QR. Câmeras encontradas: {accountDevices.Count}.");
+                }
+                else
+                {
+                    QrStatusText.Text = "Conta conectada, mas nenhuma câmera foi encontrada.";
+                    Log("Conta autenticada pelo QR, mas nenhuma câmera vinculada foi retornada.");
+                }
+                return;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (CloudServiceException ex)
+        {
+            QrStatusText.Text = "A conta conectou, mas a lista de câmeras foi recusada.";
+            Log($"FALHA AO CARREGAR CÂMERAS APÓS O QR — código {ex.Code}.");
+        }
+        catch (Exception ex)
+        {
+            QrStatusText.Text = "Falha ao consultar o QR. Gere um novo código.";
+            Log("FALHA NO LOGIN POR QR: " + SafeQrError(ex));
+        }
+    }
+
+    private static string SafeQrError(Exception error) => error switch
+    {
+        DllNotFoundException => "a ponte XMEyeBridge.dll não foi encontrada",
+        BadImageFormatException => "a ponte QR possui arquitetura incompatível",
+        _ => error.Message
+    };
 
     private async void AccountLogin_Click(object sender, RoutedEventArgs e)
     {
@@ -343,7 +453,7 @@ public partial class MainWindow : Window
         AccountPasswordBox.Clear();
         ForgetAccountButton.IsEnabled = false;
         Log("Dados da conta removidos da memória.");
-        await RefreshCaptchaAsync();
+        await RefreshQrAsync();
     }
 
     private void ClearAccountDevices()
@@ -443,6 +553,8 @@ public partial class MainWindow : Window
     {
         try
         {
+            qrLoginCts?.Cancel();
+            qrLoginCts?.Dispose();
             DisconnectVideo(log: false);
             ClearAccountDevices();
             AccountPasswordBox.Clear();

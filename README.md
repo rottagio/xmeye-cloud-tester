@@ -6,13 +6,17 @@ iCSee/XMEye vinculados a uma conta cloud.
 ## Atualizacoes
 
 O executavel inicial verifica a release mais recente no GitHub. O arquivo de release
-`XMEyeCloudTester-update.zip` contem somente os dois modulos gerenciados do projeto:
+`XMEyeCloudTester-update.zip` contém os módulos incrementais necessários:
 
 - `XMEyeCloudTester.dll`
 - `XMEyeCloudTester.App.dll`
+- `XMEyeCloudTester.App.deps.json`
+- `QRCoder.dll`
+- `XMEyeBridge.dll`
 
-As bibliotecas oficiais da fabricante nao sao publicadas neste repositorio. Elas
-permanecem na instalacao original do usuario.
+As bibliotecas oficiais da fabricante não ficam no histórico do repositório. Uma
+release pode levar somente o delta de runtime necessário para manter compatibilidade
+com o VMS Pro atual.
 
 Ao publicar uma tag no formato `vX.Y.Z`, o GitHub Actions compila os dois projetos,
 cria o pacote incremental e publica uma Release automaticamente. O aplicativo
