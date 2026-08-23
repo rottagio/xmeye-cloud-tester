@@ -1,0 +1,6 @@
+[SeverSet]
+RechargeLink=https://boss22-api-as.xmcsrv.net
+AmsApi=api-sa.jftechws.com/ams
+CapsApi=caps-sa.jftechws.com
+JvssApi=as-jvss.xmcsrv.net
+AppRegion=BR

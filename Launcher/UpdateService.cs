@@ -163,7 +163,8 @@ internal static class UpdateService
             "XMEyeCloudTester.App.dll",
             "XMEyeCloudTester.App.deps.json",
             "QRCoder.dll",
-            "XMEyeBridge.dll"
+            "XMEyeBridge.dll",
+            "CloudServer"
         ];
         if (requiredFiles.Any(file => !File.Exists(Path.Combine(stagingDirectory, file))))
             throw new InvalidDataException("O pacote nao contem todos os modulos obrigatorios do aplicativo.");

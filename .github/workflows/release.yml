@@ -36,6 +36,7 @@ jobs:
           Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.deps.json .\release-patch\
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll .\release-patch\
           Copy-Item .\XMEyeBridge.dll .\release-patch\
+          Copy-Item .\CloudServer .\release-patch\
           Compress-Archive -Path .\release-patch\* -DestinationPath .\XMEyeCloudTester-update.zip
 
       - name: Criar Release

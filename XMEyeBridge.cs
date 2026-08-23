@@ -1,12 +1,24 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.IO;
 
 namespace XMEyeCloudTester;
 
 internal static class XMEyeBridge
 {
-    private const int ResponseCapacity = 262144;
+    // A lista oficial pode conter muitos dispositivos e compartilhamentos.
+    private const int ResponseCapacity = 1048576;
     private static readonly object Sync = new();
+    private static string qtDiagnosticPath = string.Empty;
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    private static extern int XMEye_EnableQtDiagnostics(string path);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_EnableTransientDeviceStore();
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_ConfigureInMemoryDeviceStore();
 
     [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern int XMEye_HttpGet(
@@ -22,6 +34,97 @@ internal static class XMEyeBridge
         int requestType,
         StringBuilder response,
         int responseCapacity);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_HttpPostAuthorized(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string body,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string authorization,
+        int requestType,
+        StringBuilder response,
+        int responseCapacity);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_InitAppInfo(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string appId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string uuid,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string secret,
+        int moveCard);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_SetHttpApiUrl(
+        int apiType,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string serviceHost,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string amsHost);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_SetCloudToken(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string token);
+
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_QueryDeviceStatus(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string cloudId);
+
+    internal static void EnableQtDiagnostics(string path)
+    {
+        int result = XMEye_EnableQtDiagnostics(path);
+        if (result != 0)
+            throw new InvalidOperationException($"O diagnostico Qt nao iniciou ({result}).");
+        qtDiagnosticPath = path;
+    }
+
+    internal static IReadOnlyList<string> ReadQtDiagnostics()
+    {
+        if (qtDiagnosticPath.Length == 0 || !File.Exists(qtDiagnosticPath))
+            return [];
+        return File.ReadAllLines(qtDiagnosticPath, Encoding.Unicode).Distinct().ToArray();
+    }
+
+    internal static void EnableTransientDeviceStore()
+    {
+        int result = XMEye_EnableTransientDeviceStore();
+        if (result != 0)
+            throw new InvalidOperationException($"O armazenamento transitorio do CMS falhou ({result}).");
+    }
+
+    internal static void ConfigureInMemoryDeviceStore()
+    {
+        int result = XMEye_ConfigureInMemoryDeviceStore();
+        if (result != 0)
+            throw new InvalidOperationException($"O banco temporario do CMS falhou ({result}).");
+    }
+
+    internal static int InitAppInfo(string appId, string uuid, string secret, int moveCard)
+    {
+        lock (Sync)
+            return XMEye_InitAppInfo(appId, uuid, secret, moveCard);
+    }
+
+    internal static void SetHttpApiUrl(int apiType, string serviceHost, string amsHost)
+    {
+        lock (Sync)
+        {
+            int result = XMEye_SetHttpApiUrl(apiType, serviceHost, amsHost);
+            if (result != 0)
+                throw new InvalidOperationException($"A configuração regional do CMS falhou ({result}).");
+        }
+    }
+
+    internal static void SetCloudToken(string token)
+    {
+        lock (Sync)
+        {
+            int result = XMEye_SetCloudToken(token);
+            if (result != 0)
+                throw new InvalidOperationException($"A sessao Cloud nao foi aceita pelo CMS ({result}).");
+        }
+    }
+
+    internal static int QueryDeviceStatus(string cloudId)
+    {
+        lock (Sync)
+            return XMEye_QueryDeviceStatus(cloudId);
+    }
 
     internal static string Get(string url, int requestType)
     {
@@ -43,6 +146,20 @@ internal static class XMEyeBridge
             int result = XMEye_HttpPost(url, body, requestType, response, response.Capacity);
             if (result != 1 || response.Length == 0)
                 throw new InvalidOperationException($"A consulta oficial do QR falhou ({result}).");
+            return response.ToString();
+        }
+    }
+
+    internal static string PostAuthorized(
+        string url, string authorization, int requestType, string body = "")
+    {
+        lock (Sync)
+        {
+            var response = new StringBuilder(ResponseCapacity);
+            int result = XMEye_HttpPostAuthorized(
+                url, body, authorization, requestType, response, response.Capacity);
+            if (result != 1 || response.Length == 0)
+                throw new InvalidOperationException($"A consulta autenticada do QR falhou ({result}).");
             return response.ToString();
         }
     }

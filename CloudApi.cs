@@ -22,6 +22,8 @@ internal static class CloudApi
         internal required string Alias { get; init; }
         internal required string DeviceUser { get; init; }
         internal required string DevicePassword { get; init; }
+        internal string AdminToken { get; init; } = string.Empty;
+        internal bool IsShared { get; init; }
 
         public override string ToString() => string.IsNullOrWhiteSpace(Alias) ? CloudId : Alias;
     }
@@ -115,7 +117,9 @@ internal static class CloudApi
                 CloudId = cloudId,
                 Alias = GetString(device, "nickname").Trim(),
                 DeviceUser = GetString(device, "username"),
-                DevicePassword = GetString(device, "password")
+                DevicePassword = GetString(device, "password"),
+                AdminToken = string.Empty,
+                IsShared = false
             });
         }
         return devices;

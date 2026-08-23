@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
     private readonly object diagnosticLock = new();
+    private readonly object deviceLoginLock = new();
     private readonly string diagnosticPath;
     private int deviceId;
     private bool playing;
@@ -32,6 +33,10 @@ public partial class MainWindow : Window
     private string captchaToken = string.Empty;
     private CancellationTokenSource? qrLoginCts;
     private bool qrBusy;
+    private int cloudGroupId;
+    private string cloudAccessToken = string.Empty;
+    private int pendingDeviceId;
+    private TaskCompletionSource<int>? pendingDeviceLogin;
 
     public MainWindow()
     {
@@ -76,14 +81,21 @@ public partial class MainWindow : Window
             string localConfig = Path.Combine(dataDirectory, "config.ini");
             if (File.Exists(sourceConfig) && !File.Exists(localConfig))
                 File.Copy(sourceConfig, localConfig);
+            string sourceCloudServer = Path.Combine(baseDirectory, "CloudServer");
+            string localCloudServer = Path.Combine(dataDirectory, "CloudServer");
+            if (File.Exists(sourceCloudServer))
+                File.Copy(sourceCloudServer, localCloudServer, overwrite: true);
 
             Log("Driver SQLite: " +
                 (File.Exists(Path.Combine(plugins, "sqldrivers", "qsqlite.dll")) ? "carregado do pacote" : "ausente") + ".");
             qtRuntime.Initialize();
+            XMEyeBridge.EnableQtDiagnostics(Path.Combine(dataDirectory, "qt-sqlite.log"));
             int cmsResult = CmsSdk.CMS_Client_Init(dataDirectory.Replace('\\', '/'), sdkCallback, IntPtr.Zero, 0);
             sdkReady = cmsResult == 0;
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
+            XMEyeBridge.ConfigureInMemoryDeviceStore();
+            QrCloudApi.ConfigureBrazilRegion();
 
             IntPtr cloudIp = Marshal.AllocHGlobal(256);
             try
@@ -94,6 +106,7 @@ public partial class MainWindow : Window
             }
             finally { Marshal.FreeHGlobal(cloudIp); }
 
+            Log("Regiao Cloud: Brasil (SA).");
             Log("Motor pronto. Carregando o login oficial por QR da conta XMEye/iCSee...");
         }
         catch (DllNotFoundException ex)
@@ -180,9 +193,32 @@ public partial class MainWindow : Window
                 QrStatusText.Text = "Conta vinculada. Carregando câmeras...";
                 QrStatusText.Visibility = Visibility.Visible;
                 QrImage.Source = null;
+                int linkedSession = await Task.Run(
+                    () => CmsSdk.CMS_Client_UserLogin(
+                        status.LocalUser, status.LocalPassword, 1, IntPtr.Zero),
+                    cancellationToken);
+                if (linkedSession <= 0)
+                    throw new InvalidOperationException($"O CMS recusou a sessao local do QR ({linkedSession}).");
+                cloudGroupId = EnsureCloudGroup();
+                await Task.Run(() => XMEyeBridge.SetCloudToken(status.AccessToken), cancellationToken);
+                int mqttResult = await Task.Run(
+                    () => CmsSdk.CMS_Client_InitMqtt(status.AccessToken),
+                    cancellationToken);
+                await Task.Run(
+                    () => QrCloudApi.InitializeAppInfo(challenge.Secret, status.AppInfoEnc),
+                    cancellationToken);
+                QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
+                Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
                 IReadOnlyList<CloudApi.AccountDevice> devices =
-                    await CloudApi.GetDevicesByAccessTokenAsync(status.AccessToken);
+                    await Task.Run(
+                        () => QrCloudApi.GetDevices(
+                            status.AccessToken, status.LocalUser, status.LocalPassword),
+                        cancellationToken);
+                (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+                Log($"Sessao local vinculada ao QR: {linkedSession}.");
+                Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 ClearAccountDevices();
+                cloudAccessToken = status.AccessToken;
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;
                 DeviceBox.IsEnabled = accountDevices.Count > 0;
@@ -192,11 +228,31 @@ public partial class MainWindow : Window
                     DeviceBox.SelectedIndex = 0;
                     QrStatusText.Text = "Conta conectada.";
                     Log($"Conta autenticada pelo QR. Câmeras encontradas: {accountDevices.Count}.");
+                    int withUser = accountDevices.Count(device => device.DeviceUser.Length > 0);
+                    int withPassword = accountDevices.Count(device => device.DevicePassword.Length > 0);
+                    int shared = accountDevices.Count(device => device.IsShared);
+                    Log($"Dados de acesso recuperados pela nuvem: usuário em {withUser}/{accountDevices.Count}; senha em {withPassword}/{accountDevices.Count}.");
+                    Log($"Vínculo das câmeras: próprias {accountDevices.Count - shared}; compartilhadas {shared}.");
+                    QrCloudApi.CredentialParseDiagnostics parse = QrCloudApi.LastCredentialDiagnostics;
+                    Log($"Estrutura protegida: powers {parse.PowersPresent}/{accountDevices.Count}; devInfo {parse.MarkerFound}; formato cifrado {parse.EncodedFormat}; campos decodificados {parse.FiveFields}; deviceToken {parse.DeviceTokenObjects}; AdminToken {parse.AdminTokenPresent}; PWDToken {parse.PwdTokenPresent}; tokens decifrados {parse.PwdTokenDecrypted}.");
+                    Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
                 }
                 else
                 {
                     QrStatusText.Text = "Conta conectada, mas nenhuma câmera foi encontrada.";
                     Log("Conta autenticada pelo QR, mas nenhuma câmera vinculada foi retornada.");
+                }
+
+                try
+                {
+                    Log($"Grupo local Cloud preparado: {cloudGroupId}.");
+                }
+                catch (Exception ex)
+                {
+                    cloudGroupId = -1;
+                    Log("AVISO: a lista foi carregada, mas o grupo local Cloud ainda nao foi preparado: " + ex.Message);
+                    foreach (string diagnostic in XMEyeBridge.ReadQtDiagnostics())
+                        Log(diagnostic);
                 }
                 return;
             }
@@ -374,35 +430,7 @@ public partial class MainWindow : Window
         try
         {
             DisconnectVideo(log: false);
-            var result = await Task.Run(async () =>
-            {
-                var info = new CmsSdk.DeviceInfo();
-                int found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                if (found == 0)
-                {
-                    string name = string.IsNullOrWhiteSpace(selected.Alias) ? "Câmera XMEye" : selected.Alias;
-                    int added = CmsSdk.CMS_Client_AddDeviceByID(
-                        selected.CloudId, selected.DeviceUser, selected.DevicePassword,
-                        0, name, 0, 2);
-                    if (added == 0)
-                        return (Ok: false, Error: -1, Info: info);
-                    found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                }
-                if (found == 0 || info.ID <= 0)
-                    return (Ok: false, Error: -2, Info: info);
-
-                CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, true);
-                for (int attempt = 0; attempt < 50; attempt++)
-                {
-                    await Task.Delay(400);
-                    CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                    if (info.LoginHandle > 0)
-                        return (Ok: true, Error: 0, Info: info);
-                    if (info.Error != 0)
-                        return (Ok: false, Error: info.Error, Info: info);
-                }
-                return (Ok: false, Error: -3, Info: info);
-            });
+            var result = await ConnectSelectedDeviceAsync(selected);
 
             if (!result.Ok)
             {
@@ -411,6 +439,7 @@ public partial class MainWindow : Window
                     -1 => "não foi possível cadastrar a câmera no motor local",
                     -2 => "a câmera não apareceu no motor local",
                     -3 => "tempo esgotado aguardando a conexão P2P",
+                    -29 => "a autorização do dispositivo retornada pela nuvem foi recusada",
                     _ => "erro retornado pelo dispositivo ou pela nuvem"
                 };
                 Log($"FALHA AO ABRIR A CÂMERA — código {result.Error}: {detail}.");
@@ -440,8 +469,163 @@ public partial class MainWindow : Window
         finally { SetCameraBusy(false); }
     }
 
+    private async Task<(bool Ok, int Error, CmsSdk.DeviceInfo Info)> ConnectSelectedDeviceAsync(
+        CloudApi.AccountDevice selected)
+    {
+        var info = new CmsSdk.DeviceInfo();
+        int found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+
+        string name = string.IsNullOrWhiteSpace(selected.Alias) ? "Câmera XMEye" : selected.Alias;
+        string registrationId = selected.CloudId + "_000000000000";
+        string freshAdminToken = string.Empty;
+        try
+        {
+            QrCloudApi.DeviceTokenResult tokenResult = await Task.Run(
+                () => QrCloudApi.QueryDeviceToken(cloudAccessToken, selected.CloudId));
+            freshAdminToken = tokenResult.AdminToken;
+            Log($"Consulta oficial do token: codigo {tokenResult.Code}; token recebido: " +
+                (freshAdminToken.Length > 0 ? "sim." : "nao."));
+        }
+        catch (Exception ex)
+        {
+            Log("Consulta oficial do token falhou: " + ex.Message);
+        }
+        string effectiveAdminToken = freshAdminToken.Length > 0
+            ? freshAdminToken
+            : selected.AdminToken;
+        string tokenMode = freshAdminToken.Length > 0
+            ? "novo recebido diretamente"
+            : selected.AdminToken.Length > 0 ? "recebido na lista da conta" : "ausente";
+
+        if (found == 0 || info.ID <= 0)
+        {
+            int added = CmsSdk.CMS_Client_AddDeviceByID(
+                registrationId, selected.DeviceUser, selected.DevicePassword,
+                effectiveAdminToken, 0, name, cloudGroupId, selected.IsShared);
+            Log($"Cadastro ausente na sincronização; recriado: {added}.");
+            if (added < 0)
+                return (false, added, info);
+        }
+
+        found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+        if (found == 0 || info.ID <= 0)
+            return (false, -2, info);
+
+        CmsSdk.SetAdminToken(ref info, effectiveAdminToken);
+        info.Shared = selected.IsShared ? (byte)1 : (byte)0;
+        int editResult = CmsSdk.CMS_Client_EditDevice(info.ID, ref info);
+        string authorizationMode = selected.IsShared ? "compartilhada" : "própria";
+        Log($"Autorização interna aplicada: câmera {authorizationMode}; token {tokenMode}; retorno {editResult}.");
+        CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+
+        int statusQuery = XMEyeBridge.QueryDeviceStatus(selected.CloudId);
+        for (int attempt = 0; attempt < 12; attempt++)
+        {
+            await Task.Delay(250);
+            CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+            if (info.RpsHint != 0 || info.ConnectionType != 0 || CmsSdk.HasOemId(ref info))
+                break;
+        }
+        Log($"Preflight oficial de transporte: retorno {statusQuery}.");
+        LogTransportDiagnostics(ref info);
+
+        var loginSignal = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (deviceLoginLock)
+        {
+            pendingDeviceId = info.ID;
+            pendingDeviceLogin = loginSignal;
+        }
+        try
+        {
+            CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, true);
+            for (int attempt = 0; attempt < 50; attempt++)
+            {
+                Task completed = await Task.WhenAny(loginSignal.Task, Task.Delay(400));
+                if (completed == loginSignal.Task)
+                {
+                    int error = await loginSignal.Task;
+                    CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+                    LogTransportDiagnostics(ref info);
+                    return (false, error, info);
+                }
+                CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+                if (info.LoginHandle > 0)
+                    return (true, 0, info);
+                if (info.Error != 0)
+                    return (false, info.Error, info);
+            }
+            return (false, -3, info);
+        }
+        finally
+        {
+            lock (deviceLoginLock)
+            {
+                if (ReferenceEquals(pendingDeviceLogin, loginSignal))
+                {
+                    pendingDeviceLogin = null;
+                    pendingDeviceId = 0;
+                }
+            }
+        }
+    }
+
+    private (int Synchronized, int Failed) SynchronizeAccountDevicesToCms(
+        IReadOnlyList<CloudApi.AccountDevice> devices)
+    {
+        int synchronized = 0;
+        int failed = 0;
+        foreach (CloudApi.AccountDevice device in devices)
+        {
+            var existing = new CmsSdk.DeviceInfo();
+            int found = CmsSdk.CMS_Client_GetDeviceByCloudID(device.CloudId, 2, ref existing);
+            if (found != 0 && existing.ID > 0)
+            {
+                CmsSdk.CMS_Client_DeviceLoginOrLogout(existing.ID, false);
+                CmsSdk.CMS_Client_RemoveDevice(existing.ID);
+            }
+
+            string name = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera XMEye" : device.Alias;
+            int added = CmsSdk.CMS_Client_AddDeviceByID(
+                device.CloudId + "_000000000000",
+                device.DeviceUser,
+                device.DevicePassword,
+                device.AdminToken,
+                0,
+                name,
+                cloudGroupId,
+                device.IsShared);
+            if (added > 0)
+                synchronized++;
+            else
+                failed++;
+        }
+        return (synchronized, failed);
+    }
+
+    private void LogTransportDiagnostics(ref CmsSdk.DeviceInfo info)
+    {
+        bool hasOemId = CmsSdk.HasOemId(ref info);
+        Log($"Diagnostico de transporte: tipo {info.ConnectionType}; RPS sinalizado " +
+            $"{(info.RpsHint != 0 ? "sim" : "nao")}; OEM ID " +
+            $"{(hasOemId ? "presente" : "ausente")}; preflight {info.LoginProbeComplete}.");
+    }
+
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         OpenCameraButton.IsEnabled = DeviceBox.SelectedItem is CloudApi.AccountDevice;
+
+    private static int EnsureCloudGroup()
+    {
+        const string groupName = "XMEye Cloud";
+        var info = new CmsSdk.GroupInfo();
+        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID >= 0)
+            return info.ID;
+
+        int added = CmsSdk.CMS_Client_AddGroup(groupName);
+        info = new CmsSdk.GroupInfo();
+        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID >= 0)
+            return info.ID;
+        throw new InvalidOperationException($"Nao foi possivel preparar o grupo local Cloud ({added}).");
+    }
 
     private void Disconnect_Click(object sender, RoutedEventArgs e) => DisconnectVideo(log: true);
 
@@ -449,6 +633,7 @@ public partial class MainWindow : Window
     {
         DisconnectVideo(log: false);
         ClearAccountDevices();
+        cloudAccessToken = string.Empty;
         AccountBox.Clear();
         AccountPasswordBox.Clear();
         ForgetAccountButton.IsEnabled = false;
@@ -544,6 +729,12 @@ public partial class MainWindow : Window
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,
         IntPtr text1, IntPtr text2, uint size, IntPtr user)
     {
+        if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 != 0)
+        {
+            lock (deviceLoginLock)
+                if (p2 == pendingDeviceId)
+                    pendingDeviceLogin?.TrySetResult(p4);
+        }
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() => Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.")));

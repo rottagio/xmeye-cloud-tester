@@ -12,9 +12,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>XMEyeCloudTester.App</AssemblyName>
     <RootNamespace>XMEyeCloudTester</RootNamespace>
-    <Version>0.9.0</Version>
-    <AssemblyVersion>0.9.0.0</AssemblyVersion>
-    <FileVersion>0.9.0.0</FileVersion>
+    <Version>0.9.33</Version>
+    <AssemblyVersion>0.9.33.0</AssemblyVersion>
+    <FileVersion>0.9.33.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="QRCoder" Version="1.8.0" />
@@ -22,5 +22,6 @@
     <None Remove="Launcher\**\*" />
     <None Include="COMO_TESTAR.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="LEIA-ME.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="CloudServer" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
