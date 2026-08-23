@@ -642,6 +642,10 @@ public partial class MainWindow : Window
             return info.ID;
 
         int added = CmsSdk.CMS_Client_AddGroup(groupName);
+        // AddGroup devolve diretamente o ID; zero e o primeiro grupo valido.
+        if (added >= 0)
+            return added;
+
         info = new CmsSdk.GroupInfo();
         if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID >= 0)
             return info.ID;
