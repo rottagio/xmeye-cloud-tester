@@ -21,9 +21,10 @@ internal static class QrCloudApi
     internal sealed record AppIdentityDiagnostics(int MoveCard, string MoveCardKind);
     internal sealed record CredentialParseDiagnostics(
         int PowersPresent, int MarkerFound, int EncodedFormat, int FiveFields, int PasswordRecovered,
-        int DeviceTokenObjects, int AdminTokenPresent, int PwdTokenPresent, int PwdTokenDecrypted);
+        int DeviceTokenObjects, int AdminTokenPresent, int PwdTokenPresent, int PwdTokenDecrypted,
+        int SessionUserFallback, int SessionPasswordFallback);
     internal static CredentialParseDiagnostics LastCredentialDiagnostics { get; private set; } =
-        new(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     internal static AppIdentityDiagnostics LastAppIdentityDiagnostics { get; private set; } =
         new(0, "ausente");
 
@@ -38,6 +39,8 @@ internal static class QrCloudApi
         internal int AdminTokenPresent;
         internal int PwdTokenPresent;
         internal int PwdTokenDecrypted;
+        internal int SessionUserFallback;
+        internal int SessionPasswordFallback;
     }
 
     internal static Challenge CreateChallenge()
@@ -161,9 +164,11 @@ internal static class QrCloudApi
         var diagnostics = new MutableCredentialDiagnostics();
         if (listDocument.RootElement.TryGetProperty("data", out JsonElement data))
         {
-            bool partitioned = CollectDevicePartitions(data, devices, cloudIds, diagnostics);
+            bool partitioned = CollectDevicePartitions(
+                data, devices, cloudIds, diagnostics, localUser, localPassword);
             if (!partitioned)
-                CollectDevices(data, devices, cloudIds, diagnostics, false);
+                CollectDevices(
+                    data, devices, cloudIds, diagnostics, false, localUser, localPassword);
         }
         LastCredentialDiagnostics = new(
             diagnostics.PowersPresent,
@@ -174,7 +179,9 @@ internal static class QrCloudApi
             diagnostics.DeviceTokenObjects,
             diagnostics.AdminTokenPresent,
             diagnostics.PwdTokenPresent,
-            diagnostics.PwdTokenDecrypted);
+            diagnostics.PwdTokenDecrypted,
+            diagnostics.SessionUserFallback,
+            diagnostics.SessionPasswordFallback);
         return devices;
     }
 
@@ -221,13 +228,16 @@ internal static class QrCloudApi
         JsonElement element,
         List<CloudApi.AccountDevice> devices,
         HashSet<string> cloudIds,
-        MutableCredentialDiagnostics diagnostics)
+        MutableCredentialDiagnostics diagnostics,
+        string sessionUser,
+        string sessionPassword)
     {
         bool found = false;
         if (element.ValueKind == JsonValueKind.Array)
         {
             foreach (JsonElement item in element.EnumerateArray())
-                found |= CollectDevicePartitions(item, devices, cloudIds, diagnostics);
+                found |= CollectDevicePartitions(
+                    item, devices, cloudIds, diagnostics, sessionUser, sessionPassword);
             return found;
         }
         if (element.ValueKind != JsonValueKind.Object)
@@ -239,17 +249,22 @@ internal static class QrCloudApi
                 continue;
             if (property.Name.Equals("mine", StringComparison.OrdinalIgnoreCase))
             {
-                CollectDevices(property.Value, devices, cloudIds, diagnostics, false);
+                CollectDevices(
+                    property.Value, devices, cloudIds, diagnostics, false,
+                    sessionUser, sessionPassword);
                 found = true;
             }
             else if (property.Name.Equals("share", StringComparison.OrdinalIgnoreCase))
             {
-                CollectDevices(property.Value, devices, cloudIds, diagnostics, true);
+                CollectDevices(
+                    property.Value, devices, cloudIds, diagnostics, true,
+                    sessionUser, sessionPassword);
                 found = true;
             }
             else
             {
-                found |= CollectDevicePartitions(property.Value, devices, cloudIds, diagnostics);
+                found |= CollectDevicePartitions(
+                    property.Value, devices, cloudIds, diagnostics, sessionUser, sessionPassword);
             }
         }
         return found;
@@ -285,12 +300,16 @@ internal static class QrCloudApi
         List<CloudApi.AccountDevice> devices,
         HashSet<string> cloudIds,
         MutableCredentialDiagnostics diagnostics,
-        bool isShared)
+        bool isShared,
+        string sessionUser,
+        string sessionPassword)
     {
         if (element.ValueKind == JsonValueKind.Array)
         {
             foreach (JsonElement item in element.EnumerateArray())
-                CollectDevices(item, devices, cloudIds, diagnostics, isShared);
+                CollectDevices(
+                    item, devices, cloudIds, diagnostics, isShared,
+                    sessionUser, sessionPassword);
             return;
         }
 
@@ -336,6 +355,19 @@ internal static class QrCloudApi
                 }
             }
 
+            // O VMS Pro grava a credencial tecnica devolvida por code2u em
+            // todos os dispositivos quando a lista cloud omite user/password.
+            if (deviceUser.Length == 0 && sessionUser.Length > 0)
+            {
+                deviceUser = sessionUser;
+                diagnostics.SessionUserFallback++;
+            }
+            if (devicePassword.Length == 0 && sessionPassword.Length > 0)
+            {
+                devicePassword = sessionPassword;
+                diagnostics.SessionPasswordFallback++;
+            }
+
             devices.Add(new CloudApi.AccountDevice
             {
                 CloudId = cloudId,
@@ -356,7 +388,9 @@ internal static class QrCloudApi
                     : property.Name.Equals("mine", StringComparison.OrdinalIgnoreCase)
                         ? false
                         : isShared;
-                CollectDevices(property.Value, devices, cloudIds, diagnostics, childShared);
+                CollectDevices(
+                    property.Value, devices, cloudIds, diagnostics, childShared,
+                    sessionUser, sessionPassword);
             }
         }
     }
