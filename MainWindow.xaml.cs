@@ -67,7 +67,6 @@ public partial class MainWindow : Window
         try
         {
             string baseDirectory = AppContext.BaseDirectory;
-            Directory.SetCurrentDirectory(baseDirectory);
             NativeMethods.SetDllDirectory(baseDirectory);
             string plugins = Path.Combine(baseDirectory, "plugins");
             Environment.SetEnvironmentVariable("QT_PLUGIN_PATH", plugins + ";" + baseDirectory);
@@ -86,19 +85,22 @@ public partial class MainWindow : Window
             if (File.Exists(sourceCloudServer))
                 File.Copy(sourceCloudServer, localCloudServer, overwrite: true);
 
+            // O VMS Pro usa caminho vazio no CMS_Client_Init e resolve
+            // data/users e data/cloudusers relativamente ao diretorio atual.
+            Directory.SetCurrentDirectory(dataDirectory);
+
             Log("Driver SQLite: " +
                 (File.Exists(Path.Combine(plugins, "sqldrivers", "qsqlite.dll")) ? "carregado do pacote" : "ausente") + ".");
             qtRuntime.Initialize();
             XMEyeBridge.EnableQtDiagnostics(Path.Combine(dataDirectory, "qt-sqlite.log"));
-            int cmsResult = CmsSdk.CMS_Client_Init(dataDirectory.Replace('\\', '/'), sdkCallback, IntPtr.Zero, 0);
+            int cmsResult = CmsSdk.CMS_Client_Init(string.Empty, sdkCallback, IntPtr.Zero, 0);
             sdkReady = cmsResult == 0;
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
             int autoStatus = CmsSdk.CMS_Client_SetAutoCheckDevStatus(true);
             QrCloudApi.ConfigureBrazilRegion();
 
-            bool localStoreReady = WaitForLocalDeviceStore(TimeSpan.FromSeconds(8));
-            Log($"Motor de video inicializado; banco local do CMS: {(localStoreReady ? "pronto" : "ainda carregando")}.");
+            Log("Motor de video inicializado; banco local do CMS sera concluido apos o login QR.");
 
             Log("Regiao Cloud: Brasil (SA).");
             Log($"Verificacao automatica de estado: {autoStatus}.");
@@ -119,20 +121,6 @@ public partial class MainWindow : Window
             Log("Falha ao iniciar: " + ex.Message);
             DisableAccountLogin();
         }
-    }
-
-    private bool WaitForLocalDeviceStore(TimeSpan timeout)
-    {
-        Stopwatch timer = Stopwatch.StartNew();
-        do
-        {
-            qtRuntime.ProcessEvents();
-            if (CmsSdk.CMS_Client_IsFinishReadLocalDevInfo())
-                return true;
-            Thread.Sleep(20);
-        }
-        while (timer.Elapsed < timeout);
-        return false;
     }
 
     private async Task<bool> WaitForLocalDeviceStoreAsync(
@@ -243,7 +231,15 @@ public partial class MainWindow : Window
                     cancellationToken);
                 bool localStoreReady = await WaitForLocalDeviceStoreAsync(
                     TimeSpan.FromSeconds(8), cancellationToken);
-                cloudGroupId = EnsureCloudGroup();
+                try
+                {
+                    cloudGroupId = EnsureCloudGroup();
+                }
+                catch (Exception ex)
+                {
+                    cloudGroupId = -1;
+                    Log("AVISO: grupo local Cloud indisponivel; a lista sera carregada mesmo assim: " + ex.Message);
+                }
                 int bindCloudResult = await Task.Run(
                     () => CmsSdk.CMS_Client_SetBindCloudState(true),
                     cancellationToken);
@@ -587,6 +583,9 @@ public partial class MainWindow : Window
     private (int Synchronized, int Failed) SynchronizeAccountDevicesToCms(
         IReadOnlyList<CloudApi.AccountDevice> devices)
     {
+        if (cloudGroupId < 0)
+            return (0, devices.Count);
+
         int synchronized = 0;
         int failed = 0;
         foreach (CloudApi.AccountDevice device in devices)
