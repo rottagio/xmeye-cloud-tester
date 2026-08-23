@@ -493,31 +493,12 @@ public partial class MainWindow : Window
 
         string name = string.IsNullOrWhiteSpace(selected.Alias) ? "Câmera XMEye" : selected.Alias;
         string registrationId = selected.CloudId + "_000000000000";
-        string freshAdminToken = string.Empty;
-        try
-        {
-            QrCloudApi.DeviceTokenResult tokenResult = await Task.Run(
-                () => QrCloudApi.QueryDeviceToken(cloudAccessToken, selected.CloudId));
-            freshAdminToken = tokenResult.AdminToken;
-            Log($"Consulta oficial do token: codigo {tokenResult.Code}; token recebido: " +
-                (freshAdminToken.Length > 0 ? "sim." : "nao."));
-        }
-        catch (Exception ex)
-        {
-            Log("Consulta oficial do token falhou: " + ex.Message);
-        }
-        string effectiveAdminToken = freshAdminToken.Length > 0
-            ? freshAdminToken
-            : selected.AdminToken;
-        string tokenMode = freshAdminToken.Length > 0
-            ? "novo recebido diretamente"
-            : selected.AdminToken.Length > 0 ? "recebido na lista da conta" : "ausente";
 
         if (found == 0 || info.ID <= 0)
         {
             int added = CmsSdk.CMS_Client_AddDeviceByID(
                 registrationId, selected.DeviceUser, selected.DevicePassword,
-                effectiveAdminToken, 0, name, cloudGroupId, selected.IsShared);
+                selected.AdminToken, 0, name, cloudGroupId, selected.IsShared);
             Log($"Cadastro ausente na sincronização; recriado: {added}.");
             if (added < 0)
                 return (false, added, info);
@@ -527,23 +508,13 @@ public partial class MainWindow : Window
         if (found == 0 || info.ID <= 0)
             return (false, -2, info);
 
-        CmsSdk.SetAdminToken(ref info, effectiveAdminToken);
-        info.Shared = selected.IsShared ? (byte)1 : (byte)0;
-        int editResult = CmsSdk.CMS_Client_EditDevice(info.ID, ref info);
-        string authorizationMode = selected.IsShared ? "compartilhada" : "própria";
-        Log($"Autorização interna aplicada: câmera {authorizationMode}; token {tokenMode}; retorno {editResult}.");
-        CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+        Log("Cadastro Cloud preservado como foi criado pela sincronização oficial da conta.");
 
         int statusQuery = XMEyeBridge.QueryDeviceStatus(selected.CloudId);
-        for (int attempt = 0; attempt < 12; attempt++)
-        {
-            await Task.Delay(250);
-            CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-            if (info.RpsHint != 0 || info.ConnectionType != 0 || CmsSdk.HasOemId(ref info))
-                break;
-        }
+        await Task.Delay(3000);
+        CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
         Log($"Preflight oficial de transporte: retorno {statusQuery}.");
-        LogTransportDiagnostics(ref info);
+        Log("Rota de transporte entregue ao NetSDK; o resultado real sera confirmado pelo login.");
 
         var loginSignal = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (deviceLoginLock)
@@ -561,7 +532,6 @@ public partial class MainWindow : Window
                 {
                     int error = await loginSignal.Task;
                     CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                    LogTransportDiagnostics(ref info);
                     return (false, error, info);
                 }
                 CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
@@ -629,14 +599,6 @@ public partial class MainWindow : Window
                 queried++;
         }
         return queried;
-    }
-
-    private void LogTransportDiagnostics(ref CmsSdk.DeviceInfo info)
-    {
-        bool hasOemId = CmsSdk.HasOemId(ref info);
-        Log($"Diagnostico de transporte: tipo {info.ConnectionType}; RPS sinalizado " +
-            $"{(info.RpsHint != 0 ? "sim" : "nao")}; OEM ID " +
-            $"{(hasOemId ? "presente" : "ausente")}; preflight {info.LoginProbeComplete}.");
     }
 
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
