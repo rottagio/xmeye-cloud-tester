@@ -193,6 +193,16 @@ public partial class MainWindow : Window
                 QrStatusText.Text = "Conta vinculada. Carregando câmeras...";
                 QrStatusText.Visibility = Visibility.Visible;
                 QrImage.Source = null;
+                // CCloudLoginDlg::onBindCloudAccount, no VMS Pro oficial,
+                // chama InitAppInfo antes de entregar a conta ao motor Cloud.
+                // Inicializar a sessao antes desta identidade deixa o CMS com
+                // um contexto de autorizacao diferente do usado pelo VMS.
+                await Task.Run(
+                    () => QrCloudApi.InitializeAppInfo(challenge.Secret, status.AppInfoEnc),
+                    cancellationToken);
+                QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
+                Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
+
                 int linkedSession = await Task.Run(
                     () => CmsSdk.CMS_Client_UserLogin(
                         status.LocalUser, status.LocalPassword, 1, IntPtr.Zero),
@@ -204,11 +214,6 @@ public partial class MainWindow : Window
                 int mqttResult = await Task.Run(
                     () => CmsSdk.CMS_Client_InitMqtt(status.AccessToken),
                     cancellationToken);
-                await Task.Run(
-                    () => QrCloudApi.InitializeAppInfo(challenge.Secret, status.AppInfoEnc),
-                    cancellationToken);
-                QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
-                Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
                 IReadOnlyList<CloudApi.AccountDevice> devices =
                     await Task.Run(
                         () => QrCloudApi.GetDevices(

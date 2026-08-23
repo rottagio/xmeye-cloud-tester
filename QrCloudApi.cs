@@ -364,14 +364,10 @@ internal static class QrCloudApi
             }
             if (devicePassword.Length == 0 && sessionPassword.Length > 0)
             {
-                // CCloudDeviceDlg::dealWithQrCode no VMS oficial extrai
-                // &pwd= e o entrega ao SDK como "MD5_" + valor. Sem esse
-                // marcador o CMS transforma novamente o hash de 16 caracteres
-                // e o dispositivo recusa a autorizacao com -29.
-                devicePassword = sessionPassword.StartsWith(
-                    "MD5_", StringComparison.OrdinalIgnoreCase)
-                    ? sessionPassword
-                    : "MD5_" + sessionPassword;
+                // No fluxo de conta, onBindCloudAccount preserva o upass de
+                // code2u. O prefixo MD5_ pertence apenas ao PWDToken decifrado
+                // e ao QR de dispositivo individual, nao a este fallback.
+                devicePassword = sessionPassword;
                 diagnostics.SessionPasswordFallback++;
             }
 
