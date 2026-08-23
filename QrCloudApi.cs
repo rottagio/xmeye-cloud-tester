@@ -39,8 +39,8 @@ internal static class QrCloudApi
         internal int AdminTokenPresent;
         internal int PwdTokenPresent;
         internal int PwdTokenDecrypted;
-        internal int SessionUserFallback;
-        internal int SessionPasswordFallback;
+        internal int SessionUserFallback = 0;
+        internal int SessionPasswordFallback = 0;
     }
 
     internal static Challenge CreateChallenge()
@@ -355,21 +355,9 @@ internal static class QrCloudApi
                 }
             }
 
-            // O VMS Pro grava a credencial tecnica devolvida por code2u em
-            // todos os dispositivos quando a lista cloud omite user/password.
-            if (deviceUser.Length == 0 && sessionUser.Length > 0)
-            {
-                deviceUser = sessionUser;
-                diagnostics.SessionUserFallback++;
-            }
-            if (devicePassword.Length == 0 && sessionPassword.Length > 0)
-            {
-                // No fluxo de conta, onBindCloudAccount preserva o upass de
-                // code2u. O prefixo MD5_ pertence apenas ao PWDToken decifrado
-                // e ao QR de dispositivo individual, nao a este fallback.
-                devicePassword = sessionPassword;
-                diagnostics.SessionPasswordFallback++;
-            }
+            // O VMS mantém a senha vazia quando a lista não fornece password,
+            // powers ou PWDToken. O upass de code2u autentica a conta Cloud e
+            // não é a senha do dispositivo; o CMS completa essa autorização.
 
             devices.Add(new CloudApi.AccountDevice
             {
