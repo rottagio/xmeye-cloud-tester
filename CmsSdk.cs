@@ -66,6 +66,14 @@ internal static class CmsSdk
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_InitMqtt(string cloudToken);
 
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SetAutoCheckDevStatus(
+        [MarshalAs(UnmanagedType.I1)] bool enabled);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SetBindCloudState(
+        [MarshalAs(UnmanagedType.I1)] bool bound);
+
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_AddGroup(string name);
 

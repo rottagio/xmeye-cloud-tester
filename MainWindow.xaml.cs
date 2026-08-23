@@ -95,6 +95,7 @@ public partial class MainWindow : Window
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
             XMEyeBridge.ConfigureInMemoryDeviceStore();
+            int autoStatus = CmsSdk.CMS_Client_SetAutoCheckDevStatus(true);
             QrCloudApi.ConfigureBrazilRegion();
 
             IntPtr cloudIp = Marshal.AllocHGlobal(256);
@@ -107,6 +108,7 @@ public partial class MainWindow : Window
             finally { Marshal.FreeHGlobal(cloudIp); }
 
             Log("Regiao Cloud: Brasil (SA).");
+            Log($"Verificacao automatica de estado: {autoStatus}.");
             Log("Motor pronto. Carregando o login oficial por QR da conta XMEye/iCSee...");
         }
         catch (DllNotFoundException ex)
@@ -214,14 +216,21 @@ public partial class MainWindow : Window
                 int mqttResult = await Task.Run(
                     () => CmsSdk.CMS_Client_InitMqtt(status.AccessToken),
                     cancellationToken);
+                int bindCloudResult = await Task.Run(
+                    () => CmsSdk.CMS_Client_SetBindCloudState(true),
+                    cancellationToken);
                 IReadOnlyList<CloudApi.AccountDevice> devices =
                     await Task.Run(
                         () => QrCloudApi.GetDevices(
                             status.AccessToken, status.LocalUser, status.LocalPassword),
                         cancellationToken);
                 (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+                int queriedStates = await Task.Run(
+                    () => QueryAllAccountDeviceStates(devices), cancellationToken);
+                await Task.Delay(1200, cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
+                Log($"Estado de vinculo Cloud ativado: {bindCloudResult}.");
                 ClearAccountDevices();
                 cloudAccessToken = status.AccessToken;
                 accountDevices.AddRange(devices);
@@ -242,6 +251,7 @@ public partial class MainWindow : Window
                     Log($"Estrutura protegida: powers {parse.PowersPresent}/{accountDevices.Count}; devInfo {parse.MarkerFound}; formato cifrado {parse.EncodedFormat}; campos decodificados {parse.FiveFields}; deviceToken {parse.DeviceTokenObjects}; AdminToken {parse.AdminTokenPresent}; PWDToken {parse.PwdTokenPresent}; tokens decifrados {parse.PwdTokenDecrypted}.");
                     Log($"Credencial técnica do QR aplicada: usuário {parse.SessionUserFallback}; senha {parse.SessionPasswordFallback}.");
                     Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
+                    Log($"Estados Cloud consultados em conjunto: {queriedStates}/{accountDevices.Count}.");
                 }
                 else
                 {
@@ -608,6 +618,19 @@ public partial class MainWindow : Window
         return (synchronized, failed);
     }
 
+    private static int QueryAllAccountDeviceStates(
+        IReadOnlyList<CloudApi.AccountDevice> devices)
+    {
+        int queried = 0;
+        foreach (CloudApi.AccountDevice device in devices)
+        {
+            int result = XMEyeBridge.QueryDeviceStatus(device.CloudId);
+            if (result >= 0)
+                queried++;
+        }
+        return queried;
+    }
+
     private void LogTransportDiagnostics(ref CmsSdk.DeviceInfo info)
     {
         bool hasOemId = CmsSdk.HasOemId(ref info);
@@ -757,7 +780,11 @@ public partial class MainWindow : Window
             AccountPasswordBox.Clear();
             CaptchaBox.Clear();
             captchaToken = string.Empty;
-            if (sdkReady) CmsSdk.CMS_Client_UnInit();
+            if (sdkReady)
+            {
+                CmsSdk.CMS_Client_SetBindCloudState(false);
+                CmsSdk.CMS_Client_UnInit();
+            }
             qtRuntime.Dispose();
         }
         catch { }
