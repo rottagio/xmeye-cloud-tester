@@ -94,18 +94,11 @@ public partial class MainWindow : Window
             sdkReady = cmsResult == 0;
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
-            XMEyeBridge.ConfigureInMemoryDeviceStore();
             int autoStatus = CmsSdk.CMS_Client_SetAutoCheckDevStatus(true);
             QrCloudApi.ConfigureBrazilRegion();
 
-            IntPtr cloudIp = Marshal.AllocHGlobal(256);
-            try
-            {
-                unsafe { new Span<byte>((void*)cloudIp, 256).Clear(); }
-                int localLogin = CmsSdk.CMS_Client_UserLogin("admin", "", 0, cloudIp);
-                Log($"Motor de vídeo inicializado (sessão local: {localLogin}).");
-            }
-            finally { Marshal.FreeHGlobal(cloudIp); }
+            bool localStoreReady = WaitForLocalDeviceStore(TimeSpan.FromSeconds(8));
+            Log($"Motor de video inicializado; banco local do CMS: {(localStoreReady ? "pronto" : "ainda carregando")}.");
 
             Log("Regiao Cloud: Brasil (SA).");
             Log($"Verificacao automatica de estado: {autoStatus}.");
@@ -126,6 +119,35 @@ public partial class MainWindow : Window
             Log("Falha ao iniciar: " + ex.Message);
             DisableAccountLogin();
         }
+    }
+
+    private bool WaitForLocalDeviceStore(TimeSpan timeout)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+        do
+        {
+            qtRuntime.ProcessEvents();
+            if (CmsSdk.CMS_Client_IsFinishReadLocalDevInfo())
+                return true;
+            Thread.Sleep(20);
+        }
+        while (timer.Elapsed < timeout);
+        return false;
+    }
+
+    private async Task<bool> WaitForLocalDeviceStoreAsync(
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+        do
+        {
+            qtRuntime.ProcessEvents();
+            if (CmsSdk.CMS_Client_IsFinishReadLocalDevInfo())
+                return true;
+            await Task.Delay(20, cancellationToken);
+        }
+        while (timer.Elapsed < timeout);
+        return false;
     }
 
     private async void RefreshQr_Click(object sender, RoutedEventArgs e) =>
@@ -211,11 +233,17 @@ public partial class MainWindow : Window
                     cancellationToken);
                 if (linkedSession <= 0)
                     throw new InvalidOperationException($"O CMS recusou a sessao local do QR ({linkedSession}).");
-                cloudGroupId = EnsureCloudGroup();
                 await Task.Run(() => XMEyeBridge.SetCloudToken(status.AccessToken), cancellationToken);
                 int mqttResult = await Task.Run(
                     () => CmsSdk.CMS_Client_InitMqtt(status.AccessToken),
                     cancellationToken);
+                // Sequencia observada na copia instrumentada do VMS Pro atual.
+                await Task.Run(
+                    () => QrCloudApi.InitializeAppInfo(challenge.Secret, status.AppInfoEnc),
+                    cancellationToken);
+                bool localStoreReady = await WaitForLocalDeviceStoreAsync(
+                    TimeSpan.FromSeconds(8), cancellationToken);
+                cloudGroupId = EnsureCloudGroup();
                 int bindCloudResult = await Task.Run(
                     () => CmsSdk.CMS_Client_SetBindCloudState(true),
                     cancellationToken);
@@ -230,6 +258,7 @@ public partial class MainWindow : Window
                 await Task.Delay(1200, cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
+                Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
                 Log($"Estado de vinculo Cloud ativado: {bindCloudResult}.");
                 ClearAccountDevices();
                 cloudAccessToken = status.AccessToken;
@@ -566,8 +595,10 @@ public partial class MainWindow : Window
             int found = CmsSdk.CMS_Client_GetDeviceByCloudID(device.CloudId, 2, ref existing);
             if (found != 0 && existing.ID > 0)
             {
-                CmsSdk.CMS_Client_DeviceLoginOrLogout(existing.ID, false);
-                CmsSdk.CMS_Client_RemoveDevice(existing.ID);
+                // O VMS preserva o cadastro persistente. Recria-lo apagava a
+                // autorizacao tecnica que nao vem na lista HTTP.
+                synchronized++;
+                continue;
             }
 
             string name = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera XMEye" : device.Alias;
