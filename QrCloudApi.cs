@@ -364,7 +364,14 @@ internal static class QrCloudApi
             }
             if (devicePassword.Length == 0 && sessionPassword.Length > 0)
             {
-                devicePassword = sessionPassword;
+                // CCloudDeviceDlg::dealWithQrCode no VMS oficial extrai
+                // &pwd= e o entrega ao SDK como "MD5_" + valor. Sem esse
+                // marcador o CMS transforma novamente o hash de 16 caracteres
+                // e o dispositivo recusa a autorizacao com -29.
+                devicePassword = sessionPassword.StartsWith(
+                    "MD5_", StringComparison.OrdinalIgnoreCase)
+                    ? sessionPassword
+                    : "MD5_" + sessionPassword;
                 diagnostics.SessionPasswordFallback++;
             }
 
