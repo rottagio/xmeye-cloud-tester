@@ -37,6 +37,14 @@ jobs:
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll .\release-patch\
           Copy-Item .\XMEyeBridge.dll .\release-patch\
           Copy-Item .\CloudServer .\release-patch\
+          # Compatibilidade de uma unica versao com o instalador antigo, que
+          # removia o primeiro caractere de cada caminho ao copiar os arquivos.
+          Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.dll '.\release-patch\!XMEyeCloudTester.dll'
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.dll '.\release-patch\!XMEyeCloudTester.App.dll'
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.deps.json '.\release-patch\!XMEyeCloudTester.App.deps.json'
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll '.\release-patch\!QRCoder.dll'
+          Copy-Item .\XMEyeBridge.dll '.\release-patch\!XMEyeBridge.dll'
+          Copy-Item .\CloudServer '.\release-patch\!CloudServer'
           Compress-Archive -Path .\release-patch\* -DestinationPath .\XMEyeCloudTester-update.zip
 
       - name: Criar Release

@@ -199,8 +199,13 @@ try {
     }
     Start-Sleep -Milliseconds 500
 
-    $sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd('\\') + '\\'
+    $sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
+        # Arquivos iniciados por ! existem somente para reparar o atualizador
+        # antigo, que removia por engano o primeiro caractere do caminho.
+        if ($_.Name.StartsWith('!')) { return }
         $relative = $_.FullName.Substring($sourceRoot.Length)
         $target = Join-Path $Destination $relative
         $parent = Split-Path -Parent $target
