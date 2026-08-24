@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
+using Microsoft.Data.Sqlite;
 using Forms = System.Windows.Forms;
 
 namespace XMEyeCloudTester;
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
     private bool qrBusy;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
+    private string cmsDevicesDatabasePath = string.Empty;
     private volatile int previewLoginError;
     private bool isClosing;
 
@@ -750,21 +752,31 @@ public partial class MainWindow : Window
             }
             else
             {
-                if (slots == 16)
+                IReadOnlyDictionary<string, int> channelCounts = ReadOfficialChannelCounts();
+                var channelSummary = new List<string>();
+                foreach (CloudApi.AccountDevice device in accountDevices)
                 {
-                    // A lista HTTP não informa de forma confiável quais modelos
-                    // possuem duas lentes. Preserva as mesmas 16 tentativas da
-                    // versao anterior, mas mostra os canais 1/2 consecutivos.
-                    for (int index = 0; index < accountDevices.Count; index++)
-                    {
-                        requests.Add((accountDevices[index], 0));
-                        if (index < 7)
-                            requests.Add((accountDevices[index], 1));
-                    }
+                    int declared = channelCounts.TryGetValue(
+                        NormalizeChannelCloudId(device.CloudId), out int count)
+                        ? count
+                        : 0;
+                    string name = string.IsNullOrWhiteSpace(device.Alias)
+                        ? "Camera"
+                        : device.Alias;
+                    channelSummary.Add($"{name} {(declared > 0 ? declared : "desconhecido")}");
+
+                    // AnalogChan + DigitalChan vem do cadastro oficial do CMS.
+                    // Zero significa que o aparelho ainda nao revelou sua
+                    // capacidade; conserva apenas o canal 1 para diagnostico.
+                    int channelsToOpen = declared > 0 ? declared : 1;
+                    for (int channel = 0;
+                         channel < channelsToOpen && requests.Count < slots;
+                         channel++)
+                        requests.Add((device, channel));
+                    if (requests.Count >= slots)
+                        break;
                 }
-                else
-                    requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
-                        .Select(device => (device, 0)));
+                Log("Canais declarados pelo CMS: " + string.Join("; ", channelSummary) + ".");
             }
             if (requests.Count > slots)
                 requests.RemoveRange(slots, requests.Count - slots);
@@ -1165,8 +1177,27 @@ public partial class MainWindow : Window
         return queried;
     }
 
-    private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+    private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
         OpenCameraButton.IsEnabled = DeviceBox.SelectedItem is CloudApi.AccountDevice;
+        if (DeviceBox.SelectedItem is not CloudApi.AccountDevice selected)
+            return;
+
+        IReadOnlyDictionary<string, int> counts = ReadOfficialChannelCounts();
+        int declared = counts.TryGetValue(
+            NormalizeChannelCloudId(selected.CloudId), out int count)
+            ? count
+            : 0;
+        // Enquanto a capacidade for desconhecida, conserva quatro opcoes para
+        // diagnostico manual. Assim que o CMS informar a quantidade real, o
+        // seletor passa a mostrar exatamente todos os canais existentes.
+        int options = declared > 0 ? Math.Min(64, declared) : 4;
+        int previous = Math.Max(0, ChannelBox.SelectedIndex);
+        ChannelBox.Items.Clear();
+        for (int channel = 0; channel < options; channel++)
+            ChannelBox.Items.Add(new ComboBoxItem { Content = channel.ToString() });
+        ChannelBox.SelectedIndex = Math.Min(previous, options - 1);
+    }
 
     private static void EnsureCmsDataLayout(string dataDirectory)
     {
@@ -1184,7 +1215,7 @@ public partial class MainWindow : Window
         WriteCompressedTemplate(usersDatabase, compressedTemplate);
     }
 
-    private static bool EnsureCmsCloudUserStore(string cloudUser)
+    private bool EnsureCmsCloudUserStore(string cloudUser)
     {
         if (string.IsNullOrWhiteSpace(cloudUser) ||
             cloudUser.Any(character =>
@@ -1197,6 +1228,7 @@ public partial class MainWindow : Window
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
+        cmsDevicesDatabasePath = devicesDatabase;
         bool imported = TryImportVmsDeviceDatabase(cloudUser, devicesDatabase);
         if (!imported && !File.Exists(devicesDatabase))
         {
@@ -1212,6 +1244,55 @@ public partial class MainWindow : Window
         if (File.Exists(sourceConfig) && !File.Exists(cloudConfig))
             File.Copy(sourceConfig, cloudConfig);
         return imported;
+    }
+
+    private IReadOnlyDictionary<string, int> ReadOfficialChannelCounts()
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (cmsDevicesDatabasePath.Length == 0 || !File.Exists(cmsDevicesDatabasePath))
+            return counts;
+
+        try
+        {
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = cmsDevicesDatabasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Shared,
+                DefaultTimeout = 2
+            };
+            using var connection = new SqliteConnection(builder.ToString());
+            connection.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT CloudID, COALESCE(AnalogChan, 0), COALESCE(DigitalChan, 0) FROM Devices";
+            using SqliteDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                string cloudId = NormalizeChannelCloudId(reader.GetString(0));
+                int analog = Math.Max(0, reader.GetInt32(1));
+                int digital = Math.Max(0, reader.GetInt32(2));
+                int total = Math.Min(64, analog + digital);
+                if (cloudId.Length > 0 && total > 0)
+                    counts[cloudId] = total;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("AVISO: nao foi possivel ler a quantidade oficial de canais: " + ex.Message);
+        }
+        return counts;
+    }
+
+    private static string NormalizeChannelCloudId(string cloudId)
+    {
+        string normalized = cloudId.Trim();
+        const string suffix = "_Cloud";
+        return normalized.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? normalized[..^suffix.Length]
+            : normalized;
     }
 
     private static bool TryImportVmsDeviceDatabase(string cloudUser, string destination)
