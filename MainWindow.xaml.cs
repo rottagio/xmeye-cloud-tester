@@ -219,7 +219,7 @@ public partial class MainWindow : Window
                 QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
                     () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken),
                     cancellationToken);
-                EnsureCmsCloudUserStore(cmsIdentity.UserName);
+                bool importedVmsCredentials = EnsureCmsCloudUserStore(cmsIdentity.UserName);
                 int linkedSession = await Task.Run(
                     () => CmsSdk.CMS_Client_UserLogin(
                         cmsIdentity.UserName, cmsIdentity.Password, 1, IntPtr.Zero),
@@ -253,6 +253,9 @@ public partial class MainWindow : Window
                 await Task.Delay(1200, cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log("Identidade interna da conta aplicada ao CMS.");
+                Log(importedVmsCredentials
+                    ? "Credenciais locais importadas do VMS Pro."
+                    : "Banco do VMS Pro nao localizado; usando somente os dados da nuvem.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
                 Log($"Estado de vinculo Cloud ativado: {bindCloudResult}.");
@@ -660,7 +663,7 @@ public partial class MainWindow : Window
         WriteCompressedTemplate(usersDatabase, compressedTemplate);
     }
 
-    private static void EnsureCmsCloudUserStore(string cloudUser)
+    private static bool EnsureCmsCloudUserStore(string cloudUser)
     {
         if (string.IsNullOrWhiteSpace(cloudUser) ||
             cloudUser.Any(character =>
@@ -673,7 +676,8 @@ public partial class MainWindow : Window
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
-        if (!File.Exists(devicesDatabase))
+        bool imported = TryImportVmsDeviceDatabase(cloudUser, devicesDatabase);
+        if (!imported && !File.Exists(devicesDatabase))
         {
             // Esquema vazio extraido do devices.db oficial: Devices, Groups e
             // sqlite_sequence, sem cameras, nomes, seriais ou credenciais.
@@ -686,6 +690,60 @@ public partial class MainWindow : Window
         string cloudConfig = Path.Combine(cloudDirectory, "config.ini");
         if (File.Exists(sourceConfig) && !File.Exists(cloudConfig))
             File.Copy(sourceConfig, cloudConfig);
+        return imported;
+    }
+
+    private static bool TryImportVmsDeviceDatabase(string cloudUser, string destination)
+    {
+        var candidates = new List<string>();
+        string documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (documents.Length > 0)
+        {
+            candidates.Add(Path.Combine(
+                documents, "ChatGPT", "APPs", "xmeye-diagnostico", "vms-instrumentado",
+                "data", "cloudusers", cloudUser, "devices.db"));
+        }
+
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        for (int depth = 0; directory is not null && depth < 8; depth++, directory = directory.Parent)
+        {
+            candidates.Add(Path.Combine(
+                directory.FullName, "vms-instrumentado", "data", "cloudusers",
+                cloudUser, "devices.db"));
+            candidates.Add(Path.Combine(
+                directory.FullName, "xmeye-diagnostico", "vms-instrumentado", "data",
+                "cloudusers", cloudUser, "devices.db"));
+            candidates.Add(Path.Combine(
+                directory.FullName, "VMS Pro", "data", "cloudusers",
+                cloudUser, "devices.db"));
+        }
+
+        string fullDestination = Path.GetFullPath(destination);
+        foreach (string candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                string fullCandidate = Path.GetFullPath(candidate);
+                if (string.Equals(fullCandidate, fullDestination, StringComparison.OrdinalIgnoreCase) ||
+                    !IsSqliteDatabase(fullCandidate))
+                    continue;
+                File.Copy(fullCandidate, fullDestination, overwrite: true);
+                return true;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return false;
+    }
+
+    private static bool IsSqliteDatabase(string path)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length < 4096)
+            return false;
+        Span<byte> header = stackalloc byte[16];
+        using FileStream stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        return stream.Read(header) == header.Length &&
+            header.SequenceEqual("SQLite format 3\0"u8);
     }
 
     private static void WriteCompressedTemplate(string path, string template)
