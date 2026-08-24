@@ -802,7 +802,12 @@ public partial class MainWindow : Window
         {
             await DisconnectVideoAsync(log: false);
             ConfigureVideoGrid(slots);
-            VideoPlaceholder.Visibility = Visibility.Collapsed;
+            // Os HWNDs precisam existir para o CMS testar cada fluxo, mas os
+            // respectivos quadros nao precisam aparecer durante essa triagem.
+            // Mantem todos fora da grade visivel e publica somente os aceitos.
+            CompactVideoGrid(Array.Empty<int>());
+            VideoPlaceholder.Text = "Testando as cameras e os canais disponiveis...";
+            VideoPlaceholder.Visibility = Visibility.Visible;
             deviceId = 0;
 
             var requests = new List<(CloudApi.AccountDevice Device, int Channel)>();
@@ -853,7 +858,7 @@ public partial class MainWindow : Window
             int rejected = 0;
             var completedWindows = new HashSet<int>();
             var optimisticPreviewAttempts = new HashSet<int>();
-            var emptyCredentialRetries = new HashSet<string>(StringComparer.Ordinal);
+            var emptyCredentialRetries = new Dictionary<string, int>(StringComparer.Ordinal);
             var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
@@ -890,7 +895,7 @@ public partial class MainWindow : Window
                     // reconstruir a credencial direta de 64 caracteres; o VMS usa
                     // a identidade indireta da conta neste caminho (tamanho zero).
                     if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
-                        emptyCredentialRetries.Add(device.CloudId))
+                        !emptyCredentialRetries.ContainsKey(device.CloudId))
                     {
                         try { CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, false); }
                         catch { }
@@ -910,9 +915,29 @@ public partial class MainWindow : Window
                         int statusResult = added > 0
                             ? XMEyeBridge.QueryDeviceStatus(device.CloudId)
                             : int.MinValue;
+                        emptyCredentialRetries[device.CloudId] = added;
                         Log($"Grade: {name}; dispositivo recusado com -7; " +
                             $"fallback sem senha e sem AdminToken: remocao {removed}; " +
                             $"novo ID {added}; consulta {statusResult}.");
+                        continue;
+                    }
+
+                    // Depois que o proprio cadastro alternativo tambem devolve
+                    // -7, nao ha outra etapa pendente: este quadro ja pode ser
+                    // descartado. -8 tambem e terminal. Assim a grade final e
+                    // revelada logo que a triagem termina, sem exibir recusados.
+                    bool fallbackWasRejected = state == -7 &&
+                        emptyCredentialRetries.TryGetValue(device.CloudId, out int fallbackId) &&
+                        fallbackId > 0 && info.ID == fallbackId;
+                    if (fallbackWasRejected || state == -8)
+                    {
+                        completedWindows.Add(window);
+                        rejected++;
+                        string name = string.IsNullOrWhiteSpace(device.Alias)
+                            ? "Camera XMEye"
+                            : device.Alias;
+                        Log($"Grade: {name}; canal {channel}; estado terminal {state}; " +
+                            "quadro ocultado antes de exibir a grade.");
                         continue;
                     }
 
@@ -986,6 +1011,9 @@ public partial class MainWindow : Window
                 $"{hidden} recusados ocultados automaticamente.");
             playing = activePreviewWindows.Count > 0;
             DisconnectButton.IsEnabled = playing;
+            VideoPlaceholder.Text = playing
+                ? string.Empty
+                : "Nenhuma camera respondeu nesta tentativa";
             VideoPlaceholder.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
             Log($"GRADE {slots} INICIADA: fluxos aceitos {opened}; quadros ignorados/recusados {rejected}.");
         }
