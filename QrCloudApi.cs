@@ -355,9 +355,18 @@ internal static class QrCloudApi
                 }
             }
 
-            // O VMS mantém a senha vazia quando a lista não fornece password,
-            // powers ou PWDToken. O upass de code2u autentica a conta Cloud e
-            // não é a senha do dispositivo; o CMS completa essa autorização.
+            // O devices.db produzido pelo VMS oficial conserva a credencial
+            // tecnica de 16 caracteres devolvida pelo QR, sem prefixo MD5_.
+            if (deviceUser.Length == 0 && sessionUser.Length > 0)
+            {
+                deviceUser = sessionUser;
+                diagnostics.SessionUserFallback++;
+            }
+            if (devicePassword.Length == 0 && sessionPassword.Length > 0)
+            {
+                devicePassword = sessionPassword;
+                diagnostics.SessionPasswordFallback++;
+            }
 
             devices.Add(new CloudApi.AccountDevice
             {

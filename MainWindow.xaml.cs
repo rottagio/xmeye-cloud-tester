@@ -76,6 +76,7 @@ public partial class MainWindow : Window
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "XMEyeCloudAccountTester");
             Directory.CreateDirectory(dataDirectory);
+            EnsureCmsDataLayout(dataDirectory);
             string sourceConfig = Path.Combine(baseDirectory, "config.ini");
             string localConfig = Path.Combine(dataDirectory, "config.ini");
             if (File.Exists(sourceConfig) && !File.Exists(localConfig))
@@ -231,15 +232,9 @@ public partial class MainWindow : Window
                     cancellationToken);
                 bool localStoreReady = await WaitForLocalDeviceStoreAsync(
                     TimeSpan.FromSeconds(8), cancellationToken);
-                try
-                {
-                    cloudGroupId = await EnsureCloudGroupAsync(cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    cloudGroupId = -1;
-                    Log("AVISO: grupo local Cloud indisponivel; a lista sera carregada mesmo assim: " + ex.Message);
-                }
+                // No devices.db do VMS oficial, Cloud Group e virtual: a
+                // tabela Groups fica vazia e todos os dispositivos usam 65535.
+                cloudGroupId = ushort.MaxValue;
                 int bindCloudResult = await Task.Run(
                     () => CmsSdk.CMS_Client_SetBindCloudState(true),
                     cancellationToken);
@@ -631,27 +626,25 @@ public partial class MainWindow : Window
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         OpenCameraButton.IsEnabled = DeviceBox.SelectedItem is CloudApi.AccountDevice;
 
-    private static async Task<int> EnsureCloudGroupAsync(CancellationToken cancellationToken)
+    private static void EnsureCmsDataLayout(string dataDirectory)
     {
-        const string groupName = "XMEye Cloud";
-        var info = new CmsSdk.GroupInfo();
-        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID > 0)
-            return info.ID;
+        string usersDirectory = Path.Combine(dataDirectory, "data", "users");
+        Directory.CreateDirectory(usersDirectory);
+        Directory.CreateDirectory(Path.Combine(dataDirectory, "data", "cloudusers"));
+        string usersDatabase = Path.Combine(usersDirectory, "users.db");
+        if (File.Exists(usersDatabase))
+            return;
 
-        int added = CmsSdk.CMS_Client_AddGroup(groupName);
-        if (added < 0)
-            throw new InvalidOperationException($"Nao foi possivel criar o grupo local Cloud ({added}).");
-
-        // AddGroup confirma a operacao com zero; o ID e gravado de forma
-        // assincrona pelo event loop do CMS e precisa ser consultado depois.
-        for (int attempt = 0; attempt < 30; attempt++)
-        {
-            await Task.Delay(100, cancellationToken);
-            info = new CmsSdk.GroupInfo();
-            if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID > 0)
-                return info.ID;
-        }
-        throw new InvalidOperationException($"Nao foi possivel preparar o grupo local Cloud ({added}).");
+        // Banco estrutural padrao distribuido com o VMS Pro oficial. Ele
+        // contem somente o usuario local padrao e nenhuma conta/camera Cloud.
+        const string compressedTemplate =
+            "H4sIAAAAAAAEAO3by07CQBQG4DPUIJoo7mZnZuECQjUYvLAxscKgjVixtiasSJWqTQSUlqg79d1c+g4+hbrTod7RxMSd5v8y08mZdk7a2Z023d6qBpEv9jvdlheJAk0QY7QsBBElVB+id+yb+CcJmpm6GEs/kDZ+TWmevlEDAAAAAAAAwO/UtCTP5Vg98naP/PDkSFW0jdA/6fntvcFwqGRLw5HCMVaqUgyczLS9lq+rKHtZYMOcc3Yl45xu6HfD+JD4tD6eEhmzLEzLkavSFjXb3DDsuliXdWG4zqZpqQUb0nJ0S+UWO4ZdWjPszMJcVlibjrDcalW4lrnlSr3mheFpp9v8eJHunB/7b8lfV+h2cHAYfZnOZhNJvsQZBe2mf/bybF4v6sRxI77Zxmw8aGrXUv2tG1OdpW9JNQAAAAAAAAD4oyZZkvh0SvOaraBdKSzkS/lyeXZxbr5YrBj0+DhK/fr/nlQDAAAAAAAAgP8lpfGR+JXA8/f/O1INAAAAAAAAAP6VFFP1f/wjwBOhU8RIAEAAAA==";
+        byte[] compressed = Convert.FromBase64String(compressedTemplate);
+        using var source = new MemoryStream(compressed);
+        using var gzip = new System.IO.Compression.GZipStream(
+            source, System.IO.Compression.CompressionMode.Decompress);
+        using var destination = File.Create(usersDatabase);
+        gzip.CopyTo(destination);
     }
 
     private void Disconnect_Click(object sender, RoutedEventArgs e) => DisconnectVideo(log: true);
