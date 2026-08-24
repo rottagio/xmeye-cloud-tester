@@ -168,16 +168,38 @@ internal static class QrCloudApi
         using JsonDocument listDocument = JsonDocument.Parse(listResponse);
         EnsureSuccess(listDocument.RootElement, "lista QR");
 
+        return ParseDeviceList(listDocument.RootElement, localUser, localPassword);
+    }
+
+    internal static IReadOnlyList<CloudApi.AccountDevice> GetDevicesByAccount(
+        string accountUser, string accountPassword)
+    {
+        // Sequencia de CCloudLoginDlg::onAccept/onBindCloudAccount no VMS Pro:
+        // CMS_Client_UserLogin(..., type 0) e, em seguida, /mdlist/v1 com
+        // uname/upass codificados como formulario. A senha permanece apenas
+        // na memoria durante esta chamada.
+        string body = "uname=" + Uri.EscapeDataString(accountUser) +
+            "&upass=" + Uri.EscapeDataString(accountPassword);
+        string listResponse = XMEyeBridge.Post($"{AmsHost}/mdlist/v1", body, 1);
+        using JsonDocument listDocument = JsonDocument.Parse(listResponse);
+        EnsureSuccess(listDocument.RootElement, "lista da conta");
+        return ParseDeviceList(listDocument.RootElement, string.Empty, string.Empty);
+    }
+
+    private static IReadOnlyList<CloudApi.AccountDevice> ParseDeviceList(
+        JsonElement root, string sessionUser, string sessionPassword)
+    {
+
         var devices = new List<CloudApi.AccountDevice>();
         var cloudIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var diagnostics = new MutableCredentialDiagnostics();
-        if (listDocument.RootElement.TryGetProperty("data", out JsonElement data))
+        if (root.TryGetProperty("data", out JsonElement data))
         {
             bool partitioned = CollectDevicePartitions(
-                data, devices, cloudIds, diagnostics, localUser, localPassword);
+                data, devices, cloudIds, diagnostics, sessionUser, sessionPassword);
             if (!partitioned)
                 CollectDevices(
-                    data, devices, cloudIds, diagnostics, false, localUser, localPassword);
+                    data, devices, cloudIds, diagnostics, false, sessionUser, sessionPassword);
         }
         LastCredentialDiagnostics = new(
             diagnostics.PowersPresent,

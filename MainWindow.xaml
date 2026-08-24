@@ -47,14 +47,16 @@
                   Background="#2D6CDF" Foreground="White" FontWeight="SemiBold"
                   BorderThickness="0" Click="RefreshQr_Click"/>
 
-          <StackPanel Visibility="Collapsed">
+          <StackPanel Margin="0,12,0,0">
           <TextBlock Text="E-mail ou usuário da conta" Foreground="#CAD6E8"/>
           <TextBox x:Name="AccountBox" Margin="0,6,0,14" Padding="10" FontSize="15"/>
           <TextBlock Text="Senha da conta" Foreground="#CAD6E8"/>
           <PasswordBox x:Name="AccountPasswordBox" Margin="0,6,0,14" Padding="10" FontSize="15"/>
+          <TextBlock Text="Login oficial do VMS. A senha nao e salva."
+                     Foreground="#7890B2" TextWrapping="Wrap" Margin="0,0,0,10" FontSize="11"/>
 
-          <TextBlock Text="Código de verificação" Foreground="#CAD6E8"/>
-          <Grid Margin="0,6,0,14">
+          <TextBlock Text="Código de verificação" Foreground="#CAD6E8" Visibility="Collapsed"/>
+          <Grid Margin="0,6,0,14" Visibility="Collapsed">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="145"/>
               <ColumnDefinition Width="*"/>

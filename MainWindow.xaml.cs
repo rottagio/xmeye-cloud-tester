@@ -116,6 +116,7 @@ public partial class MainWindow : Window
             sdkReady = cmsResult == 0;
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
+            AccountLoginButton.IsEnabled = true;
             QrCloudApi.ConfigureBrazilRegion();
 
             Log("Motor de video inicializado; banco local do CMS sera concluido apos o login QR.");
@@ -423,6 +424,79 @@ public partial class MainWindow : Window
     {
         string account = AccountBox.Text.Trim();
         string password = AccountPasswordBox.Password;
+        if (account.Length == 0 || password.Length == 0)
+        {
+            System.Windows.MessageBox.Show("Informe o e-mail/usuario e a senha da conta.");
+            return;
+        }
+        if (!sdkReady)
+        {
+            Log("O motor oficial ainda nao esta pronto para o login da conta.");
+            return;
+        }
+        if (accountDevices.Count > 0)
+        {
+            System.Windows.MessageBox.Show(
+                "A conta atual ja esta conectada. Use SAIR E LIMPAR DADOS DA CONTA antes de entrar com outra conta.");
+            return;
+        }
+
+        SetAccountBusy(true);
+        Log($"Login oficial por conta iniciado: usuario tamanho {account.Length}; senha informada sim; tipo 0.");
+        try
+        {
+            int loginResult = await Task.Run(
+                () => CmsSdk.CMS_Client_UserLogin(account, password, 0, IntPtr.Zero));
+            if (loginResult != 1)
+            {
+                Log($"FALHA NO LOGIN OFICIAL POR CONTA: retorno {loginResult}.");
+                return;
+            }
+
+            IReadOnlyList<CloudApi.AccountDevice> devices = await Task.Run(
+                () => QrCloudApi.GetDevicesByAccount(account, password));
+            bool localStoreReady = await WaitForLocalDeviceStoreAsync(
+                TimeSpan.FromSeconds(8), CancellationToken.None);
+            cloudGroupId = ushort.MaxValue;
+            ClearAccountDevices();
+            (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+            int deviceLinkMonitor = await Task.Run(
+                () => CmsSdk.CMS_Client_StartCheckDevLink());
+            await Task.Run(() => CmsSdk.CMS_Client_EnableAutoModDeviceIP(true));
+
+            accountDevices.AddRange(devices);
+            DeviceBox.ItemsSource = accountDevices;
+            DeviceBox.IsEnabled = accountDevices.Count > 0;
+            SetGridButtonsEnabled(accountDevices.Count > 0);
+            ForgetAccountButton.IsEnabled = true;
+            if (accountDevices.Count > 0)
+                DeviceBox.SelectedIndex = 0;
+            QrImage.Source = null;
+            QrStatusText.Visibility = Visibility.Visible;
+            QrStatusText.Text = accountDevices.Count > 0
+                ? "Conta conectada por usuario e senha."
+                : "Conta conectada, mas nenhuma camera foi encontrada.";
+            Log($"Conta autenticada pelo fluxo oficial do VMS. Cameras encontradas: {accountDevices.Count}.");
+            Log($"Banco local {(localStoreReady ? "pronto" : "tempo esgotado")}; " +
+                $"lista CMS {synchronized}/{accountDevices.Count}; falhas {failed}; monitor {deviceLinkMonitor}.");
+            Log("A senha da conta nao foi salva. Para entrada automatica futura, use o QR uma vez.");
+        }
+        catch (Exception ex)
+        {
+            Log("FALHA NO LOGIN OFICIAL POR CONTA: " + SafeQrError(ex));
+        }
+        finally
+        {
+            AccountPasswordBox.Clear();
+            password = string.Empty;
+            SetAccountBusy(false);
+        }
+    }
+
+    private async void LegacyAccountLogin_Click(object sender, RoutedEventArgs e)
+    {
+        string account = AccountBox.Text.Trim();
+        string password = AccountPasswordBox.Password;
         string verificationCode = CaptchaBox.Text.Trim();
         if (account.Length == 0 || password.Length == 0)
         {
@@ -705,6 +779,7 @@ public partial class MainWindow : Window
             int opened = 0;
             int rejected = 0;
             var completedWindows = new HashSet<int>();
+            var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
                    loginTimer.Elapsed < TimeSpan.FromSeconds(30))
@@ -721,6 +796,7 @@ public partial class MainWindow : Window
                     int state = info.Error;
                     if (info.ID > 0 && automaticDeviceLoginResults.TryGetValue(info.ID, out int callbackState))
                         state = callbackState;
+                    lastLoginStates[window] = state;
 
                     if (found == 0 || info.ID <= 0)
                     {
@@ -730,16 +806,10 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    if (info.LoginHandle <= 0 && state < 0)
-                    {
-                        completedWindows.Add(window);
-                        rejected++;
-                        Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
-                            $"login recusado; estado {state}.");
-                        continue;
-                    }
-
-                    if (info.LoginHandle <= 0 && state == 0)
+                    // O CMS pode publicar um erro provisório e concluir o mesmo login
+                    // alguns segundos depois (por exemplo, -4 seguido de 1). O VMS Pro
+                    // mantém a tentativa viva; a grade deve fazer o mesmo até o prazo.
+                    if (info.LoginHandle <= 0 && state <= 0)
                         continue;
 
                     int previewResult = CmsSdk.CMS_Client_StartPreview(
@@ -771,7 +841,9 @@ public partial class MainWindow : Window
                     continue;
                 completedWindows.Add(window);
                 rejected++;
-                Log($"Grade: quadro {window + 1}; login automatico ainda pendente apos 30 segundos.");
+                int finalState = lastLoginStates.TryGetValue(window, out int state) ? state : 0;
+                Log($"Grade: quadro {window + 1}; login nao concluido apos 30 segundos; " +
+                    $"ultimo estado {finalState}.");
             }
 
             playing = activePreviewWindows.Count > 0;
@@ -1209,7 +1281,7 @@ public partial class MainWindow : Window
 
     private void SetAccountBusy(bool busy)
     {
-        AccountLoginButton.IsEnabled = !busy && sdkReady && cloudReady;
+        AccountLoginButton.IsEnabled = !busy && sdkReady;
         RefreshCaptchaButton.IsEnabled = !busy && sdkReady;
         AccountLoginButton.Content = busy ? "CARREGANDO..." : "ENTRAR E CARREGAR CÂMERAS";
     }
