@@ -48,6 +48,7 @@ public partial class MainWindow : Window
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
     private volatile int previewLoginError;
+    private bool isClosing;
 
     public MainWindow()
     {
@@ -230,8 +231,9 @@ public partial class MainWindow : Window
                 Log($"Identidade QR preparada: movecard retornado {identity.ReturnedMoveCard}; aplicado {identity.AppliedMoveCard}; formato {identity.MoveCardKind}.");
 
                 QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
-                    () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken),
+                    () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken, status.LocalUser),
                     cancellationToken);
+                Log($"Identidade CMS preparada: usuario tamanho {cmsIdentity.UserName.Length}; senha/token tamanho {cmsIdentity.Password.Length}.");
                 bool importedVmsCredentials = EnsureCmsCloudUserStore(cmsIdentity.UserName);
                 int linkedSession = await Task.Run(
                     () => CmsSdk.CMS_Client_UserLogin(
@@ -544,6 +546,19 @@ public partial class MainWindow : Window
         videoGrid.ResumeLayout(performLayout: true);
     }
 
+    private int[] RegisterVideoWindows(int count)
+    {
+        int registered = Math.Min(count, videoPanels.Count);
+        var results = new int[registered];
+        for (int window = 0; window < registered; window++)
+        {
+            int hwnd = unchecked((int)videoPanels[window].Handle.ToInt64());
+            results[window] = CmsSdk.CMS_Client_CreatePlayWindow(window, hwnd, 0);
+        }
+        Log($"Janelas nativas da grade registradas: {registered}; retornos zero {results.Count(result => result == 0)}.");
+        return results;
+    }
+
     private void SetVideoLabel(
         int window, CloudApi.AccountDevice device, int channel)
     {
@@ -568,7 +583,7 @@ public partial class MainWindow : Window
         SetCameraBusy(true);
         try
         {
-            DisconnectVideo(log: false);
+            await DisconnectVideoAsync(log: false);
             ConfigureVideoGrid(slots);
             VideoPlaceholder.Visibility = Visibility.Collapsed;
             deviceId = 0;
@@ -599,6 +614,8 @@ public partial class MainWindow : Window
             }
             if (requests.Count > slots)
                 requests.RemoveRange(slots, requests.Count - slots);
+
+            int[] windowResults = RegisterVideoWindows(requests.Count);
 
             for (int window = 0; window < requests.Count && window < videoLabels.Count; window++)
                 SetVideoLabel(window, requests[window].Device, requests[window].Channel);
@@ -645,8 +662,6 @@ public partial class MainWindow : Window
                     if (info.LoginHandle <= 0 && state == 0)
                         continue;
 
-                    int hwnd = unchecked((int)videoPanels[window].Handle.ToInt64());
-                    int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(window, hwnd, 0);
                     int previewResult = CmsSdk.CMS_Client_StartPreview(
                         info.ID, window, channel,
                         SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
@@ -654,7 +669,7 @@ public partial class MainWindow : Window
                     videoLabels[window].BringToFront();
                     completedWindows.Add(window);
                     Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
-                        $"janela {windowResult}; fluxo {previewResult}; estado {state}.");
+                        $"janela {windowResults[window]}; fluxo {previewResult}; estado {state}.");
                     if (previewResult != 0)
                     {
                         activePreviewWindows.Add(window);
@@ -707,9 +722,10 @@ public partial class MainWindow : Window
         Log("Conectando à câmera selecionada pelo Cloud ID retornado pela conta...");
         try
         {
-            DisconnectVideo(log: false);
+            await DisconnectVideoAsync(log: false);
             ConfigureVideoGrid(1);
             SetVideoLabel(0, selected, selectedChannel);
+            int windowResult = RegisterVideoWindows(1)[0];
             var result = await ConnectSelectedDeviceAsync(selected);
 
             if (!result.Ok)
@@ -729,8 +745,6 @@ public partial class MainWindow : Window
 
             deviceId = result.Info.ID;
             int channel = selectedChannel;
-            int hwnd = unchecked((int)videoPanels[0].Handle.ToInt64());
-            int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(0, hwnd, 0);
             previewLoginError = 0;
             int previewResult = CmsSdk.CMS_Client_StartPreview(
                 deviceId, 0, channel,
@@ -1056,11 +1070,12 @@ public partial class MainWindow : Window
         gzip.CopyTo(destination);
     }
 
-    private void Disconnect_Click(object sender, RoutedEventArgs e) => DisconnectVideo(log: true);
+    private async void Disconnect_Click(object sender, RoutedEventArgs e) =>
+        await DisconnectVideoAsync(log: true);
 
     private async void ForgetAccount_Click(object sender, RoutedEventArgs e)
     {
-        DisconnectVideo(log: false);
+        await DisconnectVideoAsync(log: false);
         ClearAccountDevices();
         cloudAccessToken = string.Empty;
         AccountBox.Clear();
@@ -1094,6 +1109,20 @@ public partial class MainWindow : Window
         deviceId = 0;
         VideoPlaceholder.Visibility = Visibility.Visible;
         DisconnectButton.IsEnabled = false;
+        if (log) Log("Vídeo desconectado.");
+    }
+
+    private async Task DisconnectVideoAsync(bool log)
+    {
+        bool hadNativeWindows = activePreviewWindows.Count > 0;
+        DisconnectVideo(log: false);
+        if (hadNativeWindows)
+        {
+            // StopPreview is asynchronous. Keep every HWND alive while the
+            // decoder/render threads finish before rebuilding the WinForms grid.
+            await Task.Delay(600);
+            qtRuntime.ProcessEvents();
+        }
         if (log) Log("Vídeo desconectado.");
     }
 
@@ -1239,6 +1268,8 @@ public partial class MainWindow : Window
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,
         IntPtr text1, IntPtr text2, uint size, IntPtr user)
     {
+        if (isClosing)
+            return;
         if (type == CmsSdk.MessageType.DeviceControl && p1 == 3)
         {
             automaticDeviceLoginResults[p2] = p4;
@@ -1258,20 +1289,25 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        isClosing = true;
         try
         {
             qrLoginCts?.Cancel();
             qrLoginCts?.Dispose();
-            DisconnectVideo(log: false);
+            foreach (int window in Enumerable.Range(0, Math.Max(videoPanels.Count, 16)))
+            {
+                try { CmsSdk.CMS_Client_StopPreviewByWnd(window, 0); }
+                catch { }
+            }
+            activePreviewWindows.Clear();
             ClearAccountDevices();
             AccountPasswordBox.Clear();
             CaptchaBox.Clear();
             captchaToken = string.Empty;
-            if (sdkReady)
-            {
-                CmsSdk.CMS_Client_UnInit();
-            }
-            qtRuntime.Dispose();
+            // Explicit CMS/QApplication teardown races with decoder and callback
+            // threads in this SDK build. Process exit safely reclaims both; calling
+            // UnInit here caused AccessViolation and heap-corruption crashes.
+            sdkReady = false;
         }
         catch { }
     }

@@ -196,7 +196,7 @@ internal static class QrCloudApi
         return devices;
     }
 
-    internal static CmsCloudIdentity GetCmsCloudIdentity(string accessToken)
+    internal static CmsCloudIdentity GetCmsCloudIdentity(string accessToken, string qrUserName)
     {
         string response = XMEyeBridge.PostAuthorized(
             $"{AmsHost}/userinfo2/v1",
@@ -207,16 +207,18 @@ internal static class QrCloudApi
         if (!document.RootElement.TryGetProperty("data", out JsonElement data))
             throw new InvalidOperationException("O servico oficial nao retornou a identidade interna da conta.");
 
-        string userName = GetString(data, "username");
         string identityId = GetString(data, "id");
         if (identityId.Length == 0)
             identityId = GetString(data, "userId");
-        if (userName.Length == 0 || identityId.Length == 0)
+        if (qrUserName.Length == 0 || identityId.Length == 0)
             throw new InvalidOperationException("A identidade interna da conta retornada pela nuvem esta incompleta.");
 
-        // O VMS Pro usa exatamente estes valores em CMS_Client_UserLogin.
-        // A mesma identidade de 32 caracteres alimenta o estado Cloud/MQTT.
-        return new CmsCloudIdentity(userName, identityId, identityId);
+        // Tracing the official VMS showed CMS_Client_UserLogin receiving the
+        // 24-character `uname` returned by the QR, not the 96-character
+        // descriptive `username` from userinfo2. The latter creates a separate
+        // CMS profile whose device IDs and authorizations no longer match VMS.
+        // The 32-character identity remains the CMS password and Cloud token.
+        return new CmsCloudIdentity(qrUserName, identityId, identityId);
     }
 
     internal static DeviceTokenResult QueryDeviceToken(string accessToken, string cloudId)
