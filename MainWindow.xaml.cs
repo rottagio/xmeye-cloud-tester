@@ -73,8 +73,11 @@ public partial class MainWindow : Window
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         InitializeSdk();
-        if (sdkReady)
-            await RefreshQrAsync();
+        if (!sdkReady)
+            return;
+        if (await TryRestoreSavedSessionAsync())
+            return;
+        await RefreshQrAsync();
     }
 
     private void InitializeSdk()
@@ -151,6 +154,76 @@ public partial class MainWindow : Window
         }
         while (timer.Elapsed < timeout);
         return false;
+    }
+
+    private async Task<bool> TryRestoreSavedSessionAsync()
+    {
+        if (!CloudSessionStore.TryLoad(out CloudSessionStore.Session? saved) || saved is null)
+            return false;
+
+        QrImage.Source = null;
+        QrStatusText.Text = "Restaurando a sessao protegida da conta...";
+        QrStatusText.Visibility = Visibility.Visible;
+        Log("Sessao protegida encontrada; validando na nuvem.");
+        try
+        {
+            await Task.Run(() => QrCloudApi.InitializeAppInfo(saved.QrSecret, saved.AppInfoEnc));
+            QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
+                () => QrCloudApi.GetCmsCloudIdentity(saved.AccessToken));
+            Log($"Identidade CMS restaurada: usuario tamanho {cmsIdentity.UserName.Length}; senha/token tamanho {cmsIdentity.Password.Length}.");
+
+            bool importedVmsCredentials = EnsureCmsCloudUserStore(cmsIdentity.UserName);
+            int linkedSession = await Task.Run(
+                () => CmsSdk.CMS_Client_UserLogin(
+                    cmsIdentity.UserName, cmsIdentity.Password, 1, IntPtr.Zero));
+            if (linkedSession <= 0)
+                throw new InvalidOperationException($"O CMS recusou a sessao salva ({linkedSession}).");
+
+            await Task.Run(() => XMEyeBridge.SetCloudToken(cmsIdentity.CloudToken));
+            int mqttResult = await Task.Run(
+                () => CmsSdk.CMS_Client_InitMqtt(cmsIdentity.CloudToken));
+            await Task.Run(() => QrCloudApi.InitializeAppInfo(saved.QrSecret, saved.AppInfoEnc));
+            bool localStoreReady = await WaitForLocalDeviceStoreAsync(
+                TimeSpan.FromSeconds(8), CancellationToken.None);
+
+            cloudGroupId = ushort.MaxValue;
+            ClearAccountDevices();
+            IReadOnlyList<CloudApi.AccountDevice> devices = await Task.Run(
+                () => QrCloudApi.GetDevices(
+                    saved.AccessToken, saved.LocalUser, saved.LocalPassword));
+            (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+            int deviceLinkMonitor = await Task.Run(
+                () => CmsSdk.CMS_Client_StartCheckDevLink());
+            await Task.Run(() => CmsSdk.CMS_Client_EnableAutoModDeviceIP(true));
+
+            cloudAccessToken = saved.AccessToken;
+            accountDevices.AddRange(devices);
+            DeviceBox.ItemsSource = accountDevices;
+            DeviceBox.IsEnabled = accountDevices.Count > 0;
+            SetGridButtonsEnabled(accountDevices.Count > 0);
+            ForgetAccountButton.IsEnabled = true;
+            if (accountDevices.Count > 0)
+                DeviceBox.SelectedIndex = 0;
+
+            QrStatusText.Text = accountDevices.Count > 0
+                ? "Conta conectada automaticamente."
+                : "Conta conectada, mas nenhuma camera foi encontrada.";
+            Log($"Sessao protegida restaurada. Cameras encontradas: {accountDevices.Count}.");
+            Log(importedVmsCredentials
+                ? "Cadastro local correspondente localizado no VMS Pro."
+                : "Cadastro local da conta carregado sem depender do VMS Pro.");
+            Log($"Canal oficial MQTT da sessao restaurada: {mqttResult}; banco local {(localStoreReady ? "pronto" : "tempo esgotado")}; monitor {deviceLinkMonitor}.");
+            Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            CloudSessionStore.Delete();
+            ClearAccountDevices();
+            cloudAccessToken = string.Empty;
+            Log("A sessao protegida expirou ou foi recusada; um novo QR sera solicitado: " + SafeQrError(ex));
+            return false;
+        }
     }
 
     private async void RefreshQr_Click(object sender, RoutedEventArgs e) =>
@@ -231,7 +304,7 @@ public partial class MainWindow : Window
                 Log($"Identidade QR preparada: movecard retornado {identity.ReturnedMoveCard}; aplicado {identity.AppliedMoveCard}; formato {identity.MoveCardKind}.");
 
                 QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
-                    () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken, status.LocalUser),
+                    () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken),
                     cancellationToken);
                 Log($"Identidade CMS preparada: usuario tamanho {cmsIdentity.UserName.Length}; senha/token tamanho {cmsIdentity.Password.Length}.");
                 bool importedVmsCredentials = EnsureCmsCloudUserStore(cmsIdentity.UserName);
@@ -277,6 +350,13 @@ public partial class MainWindow : Window
                 Log($"Monitor oficial de vinculo dos dispositivos iniciado: {deviceLinkMonitor}.");
                 Log("Atualizacao automatica dos cadastros ativada como no VMS Pro.");
                 cloudAccessToken = status.AccessToken;
+                CloudSessionStore.Save(new CloudSessionStore.Session(
+                    status.AccessToken,
+                    challenge.Secret,
+                    status.AppInfoEnc,
+                    status.LocalUser,
+                    status.LocalPassword));
+                Log("Sessao da conta protegida pelo Windows para os proximos acessos.");
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;
                 DeviceBox.IsEnabled = accountDevices.Count > 0;
@@ -1076,6 +1156,7 @@ public partial class MainWindow : Window
     private async void ForgetAccount_Click(object sender, RoutedEventArgs e)
     {
         await DisconnectVideoAsync(log: false);
+        CloudSessionStore.Delete();
         ClearAccountDevices();
         cloudAccessToken = string.Empty;
         AccountBox.Clear();
