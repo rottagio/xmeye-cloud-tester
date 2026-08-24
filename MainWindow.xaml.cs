@@ -28,6 +28,7 @@ public partial class MainWindow : Window
         CellBorderStyle = Forms.TableLayoutPanelCellBorderStyle.Single
     };
     private readonly List<Forms.Panel> videoPanels = [];
+    private readonly List<Forms.Label> videoLabels = [];
     private readonly HashSet<int> activePreviewWindows = [];
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
@@ -506,6 +507,7 @@ public partial class MainWindow : Window
         }
 
         videoPanels.Clear();
+        videoLabels.Clear();
         for (int index = 0; index < side * side; index++)
         {
             var panel = new Forms.Panel
@@ -514,10 +516,37 @@ public partial class MainWindow : Window
                 Dock = Forms.DockStyle.Fill,
                 Margin = new Forms.Padding(1)
             };
+            var label = new Forms.Label
+            {
+                AutoSize = true,
+                BackColor = System.Drawing.Color.Black,
+                ForeColor = System.Drawing.Color.White,
+                Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Bold),
+                Location = new System.Drawing.Point(6, 6),
+                Padding = new Forms.Padding(5, 3, 5, 3),
+                UseMnemonic = false,
+                Visible = false
+            };
+            panel.Controls.Add(label);
             videoPanels.Add(panel);
+            videoLabels.Add(label);
             videoGrid.Controls.Add(panel, index % side, index / side);
         }
         videoGrid.ResumeLayout(performLayout: true);
+    }
+
+    private void SetVideoLabel(
+        int window, CloudApi.AccountDevice device, int channel)
+    {
+        if (window < 0 || window >= videoLabels.Count)
+            return;
+        string name = string.IsNullOrWhiteSpace(device.Alias)
+            ? $"Câmera {window + 1}"
+            : device.Alias;
+        Forms.Label label = videoLabels[window];
+        label.Text = $"{name} — Canal {channel + 1}";
+        label.Visible = true;
+        label.BringToFront();
     }
 
     private async void GridLayout_Click(object sender, RoutedEventArgs e)
@@ -554,6 +583,9 @@ public partial class MainWindow : Window
                         .Select(device => (device, 1)));
                 }
             }
+
+            for (int window = 0; window < requests.Count && window < videoLabels.Count; window++)
+                SetVideoLabel(window, requests[window].Device, requests[window].Channel);
 
             Log($"Abrindo grade {slots}: {requests.Count} tentativas em ordem; " +
                 $"stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
@@ -603,6 +635,7 @@ public partial class MainWindow : Window
                         info.ID, window, channel,
                         SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
                         false);
+                    videoLabels[window].BringToFront();
                     completedWindows.Add(window);
                     Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
                         $"janela {windowResult}; fluxo {previewResult}; estado {state}.");
@@ -660,6 +693,7 @@ public partial class MainWindow : Window
         {
             DisconnectVideo(log: false);
             ConfigureVideoGrid(1);
+            SetVideoLabel(0, selected, selectedChannel);
             var result = await ConnectSelectedDeviceAsync(selected);
 
             if (!result.Ok)
@@ -1197,7 +1231,13 @@ public partial class MainWindow : Window
         }
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
-        Dispatcher.BeginInvoke((Action)(() => Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.")));
+        Dispatcher.BeginInvoke((Action)(() =>
+        {
+            if (type == CmsSdk.MessageType.VideoWindowControl &&
+                p1 is 0 or 27 && p4 >= 0 && p4 < videoLabels.Count)
+                videoLabels[p4].BringToFront();
+            Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.");
+        }));
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
