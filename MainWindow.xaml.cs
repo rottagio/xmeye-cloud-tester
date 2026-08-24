@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private bool qrBusy;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
+    private volatile int previewLoginError;
 
     public MainWindow()
     {
@@ -493,6 +494,7 @@ public partial class MainWindow : Window
             int channel = int.Parse(((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
             int hwnd = unchecked((int)videoPanel.Handle.ToInt64());
             int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(0, hwnd, 0);
+            previewLoginError = 0;
             int previewResult = CmsSdk.CMS_Client_StartPreview(
                 deviceId, 0, channel,
                 SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
@@ -503,6 +505,18 @@ public partial class MainWindow : Window
                 Log("A câmera conectou, mas a abertura do vídeo falhou.");
                 return;
             }
+            (bool loginConfirmed, int loginError) = await WaitForPreviewLoginAsync(selected.CloudId);
+            if (!loginConfirmed)
+            {
+                CmsSdk.CMS_Client_StopPreviewByWnd(0, 0);
+                string detail = loginError == -7
+                    ? "a credencial técnica do dispositivo foi recusada"
+                    : loginError == -3
+                        ? "tempo esgotado aguardando a confirmação do vídeo"
+                        : "erro retornado pelo dispositivo ou pela nuvem";
+                Log($"FALHA AO CONFIRMAR O VÍDEO — código {loginError}: {detail}.");
+                return;
+            }
             playing = true;
             VideoPlaceholder.Visibility = Visibility.Collapsed;
             DisconnectButton.IsEnabled = true;
@@ -510,6 +524,23 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { Log("ERRO AO ABRIR A CÂMERA: " + ex.Message); }
         finally { SetCameraBusy(false); }
+    }
+
+    private async Task<(bool Ok, int Error)> WaitForPreviewLoginAsync(string cloudId)
+    {
+        for (int attempt = 0; attempt < 80; attempt++)
+        {
+            await Task.Delay(250);
+            if (previewLoginError < 0)
+                return (false, previewLoginError);
+            var info = new CmsSdk.DeviceInfo();
+            CmsSdk.CMS_Client_GetDeviceByCloudID(cloudId, 2, ref info);
+            if (info.LoginHandle > 0)
+                return (true, 0);
+            if (info.Error != 0)
+                return (false, info.Error);
+        }
+        return (false, -3);
     }
 
     private async Task<(bool Ok, int Error, CmsSdk.DeviceInfo Info)> ConnectSelectedDeviceAsync(
@@ -693,6 +724,12 @@ public partial class MainWindow : Window
                     !IsSqliteDatabase(fullCandidate))
                     continue;
                 File.Copy(fullCandidate, fullDestination, overwrite: true);
+                string sourceProfile = Path.Combine(
+                    Path.GetDirectoryName(fullCandidate)!, "config.ini");
+                string destinationProfile = Path.Combine(
+                    Path.GetDirectoryName(fullDestination)!, "config.ini");
+                if (File.Exists(sourceProfile))
+                    File.Copy(sourceProfile, destinationProfile, overwrite: true);
                 return true;
             }
             catch (IOException) { }
@@ -823,6 +860,9 @@ public partial class MainWindow : Window
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,
         IntPtr text1, IntPtr text2, uint size, IntPtr user)
     {
+        if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 &&
+            p2 == deviceId && p4 < 0)
+            previewLoginError = p4;
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() => Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.")));
