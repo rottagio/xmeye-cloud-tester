@@ -16,6 +16,7 @@ namespace XMEyeCloudTester;
 
 public partial class MainWindow : Window
 {
+    private const string CmsDataProfileName = "XMEyeCloudAccountTester-CMS-v2";
     private static class NativeMethods
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -93,9 +94,7 @@ public partial class MainWindow : Window
             Environment.SetEnvironmentVariable("QT_PLUGIN_PATH", plugins + ";" + baseDirectory);
             Environment.SetEnvironmentVariable("QT_QPA_PLATFORM_PLUGIN_PATH", Path.Combine(plugins, "platforms"));
 
-            string dataDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "XMEyeCloudAccountTester");
+            string dataDirectory = GetCmsDataDirectory();
             Directory.CreateDirectory(dataDirectory);
             EnsureCmsDataLayout(dataDirectory);
             string sourceConfig = Path.Combine(baseDirectory, "config.ini");
@@ -123,6 +122,7 @@ public partial class MainWindow : Window
             QrCloudApi.ConfigureBrazilRegion();
 
             Log("Motor de video inicializado; banco local do CMS sera concluido apos o login QR.");
+            Log("Perfil local do CMS: limpo v2.");
 
             Log("Regiao Cloud: Brasil (SA).");
             Log("Verificacao automatica de estado: padrao interno do CMS (igual ao VMS Pro).");
@@ -1574,9 +1574,7 @@ public partial class MainWindow : Window
                 !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
             throw new InvalidOperationException("A identidade tecnica do QR nao pode formar o banco Cloud.");
 
-        string dataDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "XMEyeCloudAccountTester");
+        string dataDirectory = GetCmsDataDirectory();
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
@@ -1597,6 +1595,10 @@ public partial class MainWindow : Window
             File.Copy(sourceConfig, cloudConfig);
         return imported;
     }
+
+    private static string GetCmsDataDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        CmsDataProfileName);
 
     private IReadOnlyDictionary<string, int> ReadOfficialChannelCounts()
     {
