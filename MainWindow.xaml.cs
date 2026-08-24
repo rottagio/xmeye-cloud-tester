@@ -520,7 +520,7 @@ public partial class MainWindow : Window
         if (found == 0 || info.ID <= 0)
         {
             int added = CmsSdk.CMS_Client_AddDeviceByID(
-                selected.CloudId, selected.DeviceUser, selected.DevicePassword,
+                FormatCmsRegistrationId(selected.CloudId), selected.DeviceUser, selected.DevicePassword,
                 selected.AdminToken, 0, name, cloudGroupId, selected.IsShared);
             Log($"Cadastro ausente na sincronização; recriado: {added}.");
             if (added < 0)
@@ -600,7 +600,7 @@ public partial class MainWindow : Window
 
             string name = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera XMEye" : device.Alias;
             int added = CmsSdk.CMS_Client_AddDeviceByID(
-                device.CloudId,
+                FormatCmsRegistrationId(device.CloudId),
                 device.DeviceUser,
                 device.DevicePassword,
                 device.AdminToken,
@@ -615,6 +615,9 @@ public partial class MainWindow : Window
         }
         return (synchronized, failed);
     }
+
+    private static string FormatCmsRegistrationId(string cloudId) =>
+        cloudId.Contains('_', StringComparison.Ordinal) ? cloudId : cloudId + "_Cloud";
 
     private static int QueryAllAccountDeviceStates(
         IReadOnlyList<CloudApi.AccountDevice> devices)
