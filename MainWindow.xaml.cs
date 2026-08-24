@@ -195,7 +195,11 @@ public partial class MainWindow : Window
             IReadOnlyList<CloudApi.AccountDevice> devices = await Task.Run(
                 () => QrCloudApi.GetDevices(
                     saved.AccessToken, saved.LocalUser, saved.LocalPassword));
-            (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+            (int synchronized, int failed) = importedVmsCredentials
+                ? (devices.Count, 0)
+                : SynchronizeAccountDevicesToCms(devices);
+            if (importedVmsCredentials)
+                Log("Cadastros oficiais do VMS Pro preservados sem recriacao local.");
             int deviceLinkMonitor = await Task.Run(
                 () => CmsSdk.CMS_Client_StartCheckDevLink());
             await Task.Run(() => CmsSdk.CMS_Client_EnableAutoModDeviceIP(true));
@@ -337,7 +341,11 @@ public partial class MainWindow : Window
                         () => QrCloudApi.GetDevices(
                             status.AccessToken, status.LocalUser, status.LocalPassword),
                         cancellationToken);
-                (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+                (int synchronized, int failed) = importedVmsCredentials
+                    ? (devices.Count, 0)
+                    : SynchronizeAccountDevicesToCms(devices);
+                if (importedVmsCredentials)
+                    Log("Cadastros oficiais do VMS Pro preservados sem recriacao local.");
                 int deviceLinkMonitor = await Task.Run(
                     () => CmsSdk.CMS_Client_StartCheckDevLink(),
                     cancellationToken);
