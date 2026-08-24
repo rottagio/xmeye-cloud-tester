@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
@@ -24,6 +26,7 @@ public partial class MainWindow : Window
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
     private readonly object diagnosticLock = new();
     private readonly string diagnosticPath;
+    private readonly string diagnosticSession = Guid.NewGuid().ToString("N")[..8];
     private int deviceId;
     private bool playing;
     private bool sdkReady;
@@ -51,6 +54,8 @@ public partial class MainWindow : Window
         VideoHost.Child = videoPanel;
         Loaded += OnLoaded;
         Closing += OnClosing;
+        Log($"Diagnostico iniciado: sessao {diagnosticSession}; versao {version.Major}.{version.Minor}.{version.Build}; " +
+            $"Windows {Environment.OSVersion.Version}; processo {RuntimeInformation.ProcessArchitecture}.");
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -469,6 +474,11 @@ public partial class MainWindow : Window
         if (DeviceBox.SelectedItem is not CloudApi.AccountDevice selected)
             return;
         SetCameraBusy(true);
+        int selectedChannel = int.Parse(((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
+        Log($"Parametros seguros da selecao: Cloud ID tamanho {selected.CloudId.Length}; " +
+            $"usuario tamanho {selected.DeviceUser.Length}; senha tamanho {selected.DevicePassword.Length}; " +
+            $"token tamanho {selected.AdminToken.Length}; compartilhada {(selected.IsShared ? 1 : 0)}; " +
+            $"canal {selectedChannel}; stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
         Log("Conectando à câmera selecionada pelo Cloud ID retornado pela conta...");
         try
         {
@@ -491,7 +501,7 @@ public partial class MainWindow : Window
             }
 
             deviceId = result.Info.ID;
-            int channel = int.Parse(((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
+            int channel = selectedChannel;
             int hwnd = unchecked((int)videoPanel.Handle.ToInt64());
             int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(0, hwnd, 0);
             previewLoginError = 0;
@@ -532,14 +542,26 @@ public partial class MainWindow : Window
         {
             await Task.Delay(250);
             if (previewLoginError < 0)
+            {
+                Log($"Confirmacao do preview interrompida no ciclo {attempt + 1}/80 pelo callback {previewLoginError}.");
                 return (false, previewLoginError);
+            }
             var info = new CmsSdk.DeviceInfo();
-            CmsSdk.CMS_Client_GetDeviceByCloudID(cloudId, 2, ref info);
+            int found = CmsSdk.CMS_Client_GetDeviceByCloudID(cloudId, 2, ref info);
             if (info.LoginHandle > 0)
+            {
+                Log($"Confirmacao do preview recebida no ciclo {attempt + 1}/80: consulta {found}; " +
+                    $"ID {info.ID}; loginType {info.LoginType}; loginHandle positivo; erro {info.Error}.");
                 return (true, 0);
+            }
             if (info.Error != 0)
+            {
+                Log($"Confirmacao do preview recusada no ciclo {attempt + 1}/80: consulta {found}; " +
+                    $"ID {info.ID}; loginType {info.LoginType}; loginHandle {info.LoginHandle}; erro {info.Error}.");
                 return (false, info.Error);
+            }
         }
+        Log("Confirmacao do preview esgotou 80 ciclos em 20 segundos sem handle ou erro do cadastro.");
         return (false, -3);
     }
 
@@ -548,6 +570,8 @@ public partial class MainWindow : Window
     {
         var info = new CmsSdk.DeviceInfo();
         int found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+        Log($"Consulta inicial do cadastro: retorno {found}; ID {info.ID}; " +
+            $"loginType {info.LoginType}; loginHandle {info.LoginHandle}; erro {info.Error}.");
 
         string name = string.IsNullOrWhiteSpace(selected.Alias) ? "Câmera XMEye" : selected.Alias;
         if (found == 0 || info.ID <= 0)
@@ -561,6 +585,8 @@ public partial class MainWindow : Window
         }
 
         found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+        Log($"Consulta final do cadastro: retorno {found}; ID {info.ID}; " +
+            $"loginType {info.LoginType}; loginHandle {info.LoginHandle}; erro {info.Error}.");
         if (found == 0 || info.ID <= 0)
             return (false, -2, info);
 
@@ -855,6 +881,78 @@ public partial class MainWindow : Window
     }
 
     private void CopyLog_Click(object sender, RoutedEventArgs e) => System.Windows.Clipboard.SetText(LogBox.Text);
+
+    private void SendDiagnostic_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            string report = BuildSafeDiagnosticReport();
+            string title = $"Diagnostico {diagnosticSession} - falha ao abrir video";
+            string issueUrl =
+                "https://github.com/rottagio/xmeye-cloud-tester/issues/new" +
+                "?title=" + Uri.EscapeDataString(title) +
+                "&labels=diagnostic" +
+                "&body=" + Uri.EscapeDataString(report);
+            Process.Start(new ProcessStartInfo(issueUrl) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(
+                "Nao foi possivel abrir o envio do diagnostico.\n\n" + ex.Message,
+                "Diagnostico", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private string BuildSafeDiagnosticReport()
+    {
+        Version version = typeof(MainWindow).Assembly.GetName().Version ?? new Version(0, 0);
+        string log = SanitizeDiagnostic(LogBox.Text);
+        const int maxLogLength = 12_000;
+        if (log.Length > maxLogLength)
+            log = "[trecho inicial omitido]\n" + log[^maxLogLength..];
+
+        var report = new StringBuilder();
+        report.AppendLine("## Diagnostico automatico do XMEye Cloud Tester");
+        report.AppendLine();
+        report.AppendLine($"- Sessao: `{diagnosticSession}`");
+        report.AppendLine($"- Versao: `{version.Major}.{version.Minor}.{version.Build}`");
+        report.AppendLine($"- Windows: `{Environment.OSVersion.Version}`");
+        report.AppendLine($"- Arquitetura: `{RuntimeInformation.ProcessArchitecture}`");
+        report.AppendLine("- Regiao Cloud: `Brasil (SA)`");
+        report.AppendLine();
+        report.AppendLine("Dados pessoais, credenciais, seriais, tokens, IPs e caminhos locais foram removidos automaticamente.");
+        report.AppendLine();
+        report.AppendLine("```text");
+        report.Append(log.TrimEnd());
+        report.AppendLine();
+        report.AppendLine("```");
+        return report.ToString();
+    }
+
+    private static string SanitizeDiagnostic(string text)
+    {
+        string safe = Regex.Replace(
+            text,
+            @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+            "[email removido]",
+            RegexOptions.CultureInvariant);
+        safe = Regex.Replace(
+            safe,
+            @"(?i)(?:[A-Z]:\\|\\\\)[^\r\n]+",
+            "[caminho removido]",
+            RegexOptions.CultureInvariant);
+        safe = Regex.Replace(
+            safe,
+            @"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)",
+            "[ip removido]",
+            RegexOptions.CultureInvariant);
+        safe = Regex.Replace(
+            safe,
+            @"(?<![A-Za-z0-9+/=_\-])[A-Za-z0-9+/=_\-]{16,}(?![A-Za-z0-9+/=_\-])",
+            "[dado tecnico removido]",
+            RegexOptions.CultureInvariant);
+        return safe;
+    }
 
     private void OnSdkMessage(
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,

@@ -117,7 +117,10 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
         <DockPanel>
           <TextBlock Text="DIAGNÓSTICO SEM CREDENCIAIS" Foreground="#91A4C3" FontWeight="SemiBold"/>
-          <Button Content="Copiar" DockPanel.Dock="Right" Padding="10,3" Click="CopyLog_Click"/>
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+            <Button Content="Copiar" Padding="10,3" Margin="0,0,6,0" Click="CopyLog_Click"/>
+            <Button Content="ENVIAR DIAGNÓSTICO" Padding="10,3" Click="SendDiagnostic_Click"/>
+          </StackPanel>
         </DockPanel>
         <TextBox x:Name="LogBox" Grid.Row="1" Margin="0,8,0,0" Background="Transparent"
                  Foreground="#C9D7EB" BorderThickness="0" IsReadOnly="True" TextWrapping="Wrap"
