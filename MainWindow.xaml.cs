@@ -651,7 +651,15 @@ public partial class MainWindow : Window
         };
 
         videoGrid.SuspendLayout();
-        foreach (Forms.Control control in videoGrid.Controls.Cast<Forms.Control>().ToArray())
+        // Alguns containers recusados podem ter sido removidos da grade visual,
+        // mas continuam vivos para preservar os HWNDs durante os callbacks. Ao
+        // reconstruir, libera todos eles, estejam ou nao anexados a grade.
+        foreach (Forms.Control control in videoPanels
+            .Select(panel => panel.Parent)
+            .Where(parent => parent is not null)
+            .Distinct()
+            .Cast<Forms.Control>()
+            .ToArray())
             control.Dispose();
         videoGrid.Controls.Clear();
         videoGrid.ColumnStyles.Clear();
@@ -698,6 +706,59 @@ public partial class MainWindow : Window
             videoPanels.Add(panel);
             videoLabels.Add(label);
             videoGrid.Controls.Add(container, index % side, index / side);
+        }
+        videoGrid.ResumeLayout(performLayout: true);
+    }
+
+    private void CompactVideoGrid(IReadOnlyCollection<int> visibleWindows)
+    {
+        int[] ordered = visibleWindows
+            .Where(window => window >= 0 && window < videoPanels.Count)
+            .Distinct()
+            .OrderBy(window => window)
+            .ToArray();
+        int columns = ordered.Length switch
+        {
+            <= 1 => 1,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => 4
+        };
+        int rows = Math.Max(1, (int)Math.Ceiling(ordered.Length / (double)columns));
+        var visible = ordered.ToHashSet();
+
+        videoGrid.SuspendLayout();
+        for (int window = 0; window < videoPanels.Count; window++)
+        {
+            Forms.Control? container = videoPanels[window].Parent;
+            if (container is null || visible.Contains(window))
+                continue;
+            container.Visible = false;
+            if (videoGrid.Controls.Contains(container))
+                videoGrid.Controls.Remove(container);
+        }
+
+        videoGrid.ColumnStyles.Clear();
+        videoGrid.RowStyles.Clear();
+        videoGrid.ColumnCount = columns;
+        videoGrid.RowCount = rows;
+        for (int column = 0; column < columns; column++)
+            videoGrid.ColumnStyles.Add(
+                new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / columns));
+        for (int row = 0; row < rows; row++)
+            videoGrid.RowStyles.Add(
+                new Forms.RowStyle(Forms.SizeType.Percent, 100F / rows));
+
+        for (int position = 0; position < ordered.Length; position++)
+        {
+            Forms.Control? container = videoPanels[ordered[position]].Parent;
+            if (container is null)
+                continue;
+            container.Visible = true;
+            if (!videoGrid.Controls.Contains(container))
+                videoGrid.Controls.Add(container);
+            videoGrid.SetCellPosition(container, new Forms.TableLayoutPanelCellPosition(
+                position % columns, position / columns));
         }
         videoGrid.ResumeLayout(performLayout: true);
     }
@@ -919,6 +980,10 @@ public partial class MainWindow : Window
                     $"ultimo estado {finalState}.");
             }
 
+            int hidden = requests.Count - activePreviewWindows.Count;
+            CompactVideoGrid(activePreviewWindows);
+            Log($"Grade compactada: {activePreviewWindows.Count} fluxos aceitos visiveis; " +
+                $"{hidden} recusados ocultados automaticamente.");
             playing = activePreviewWindows.Count > 0;
             DisconnectButton.IsEnabled = playing;
             VideoPlaceholder.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
