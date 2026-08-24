@@ -18,6 +18,7 @@ internal static class QrCloudApi
         bool Completed, bool Expired, bool Limited, string AccessToken, string AppInfoEnc,
         string LocalUser, string LocalPassword);
     internal sealed record DeviceTokenResult(int Code, string AdminToken);
+    internal sealed record CmsCloudIdentity(string UserName, string Password, string CloudToken);
     internal sealed record AppIdentityDiagnostics(int MoveCard, string MoveCardKind);
     internal sealed record CredentialParseDiagnostics(
         int PowersPresent, int MarkerFound, int EncodedFormat, int FiveFields, int PasswordRecovered,
@@ -183,6 +184,29 @@ internal static class QrCloudApi
             diagnostics.SessionUserFallback,
             diagnostics.SessionPasswordFallback);
         return devices;
+    }
+
+    internal static CmsCloudIdentity GetCmsCloudIdentity(string accessToken)
+    {
+        string response = XMEyeBridge.PostAuthorized(
+            $"{AmsHost}/userinfo2/v1",
+            accessToken,
+            2);
+        using JsonDocument document = JsonDocument.Parse(response);
+        EnsureSuccess(document.RootElement, "userinfo2");
+        if (!document.RootElement.TryGetProperty("data", out JsonElement data))
+            throw new InvalidOperationException("O servico oficial nao retornou a identidade interna da conta.");
+
+        string userName = GetString(data, "username");
+        string identityId = GetString(data, "id");
+        if (identityId.Length == 0)
+            identityId = GetString(data, "userId");
+        if (userName.Length == 0 || identityId.Length == 0)
+            throw new InvalidOperationException("A identidade interna da conta retornada pela nuvem esta incompleta.");
+
+        // O VMS Pro usa exatamente estes valores em CMS_Client_UserLogin.
+        // A mesma identidade de 32 caracteres alimenta o estado Cloud/MQTT.
+        return new CmsCloudIdentity(userName, identityId, identityId);
     }
 
     internal static DeviceTokenResult QueryDeviceToken(string accessToken, string cloudId)

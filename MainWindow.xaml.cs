@@ -216,16 +216,19 @@ public partial class MainWindow : Window
                 QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
                 Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
 
-                EnsureCmsCloudUserStore(status.LocalUser);
+                QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
+                    () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken),
+                    cancellationToken);
+                EnsureCmsCloudUserStore(cmsIdentity.UserName);
                 int linkedSession = await Task.Run(
                     () => CmsSdk.CMS_Client_UserLogin(
-                        status.LocalUser, status.LocalPassword, 1, IntPtr.Zero),
+                        cmsIdentity.UserName, cmsIdentity.Password, 1, IntPtr.Zero),
                     cancellationToken);
                 if (linkedSession <= 0)
                     throw new InvalidOperationException($"O CMS recusou a sessao local do QR ({linkedSession}).");
-                await Task.Run(() => XMEyeBridge.SetCloudToken(status.AccessToken), cancellationToken);
+                await Task.Run(() => XMEyeBridge.SetCloudToken(cmsIdentity.CloudToken), cancellationToken);
                 int mqttResult = await Task.Run(
-                    () => CmsSdk.CMS_Client_InitMqtt(status.AccessToken),
+                    () => CmsSdk.CMS_Client_InitMqtt(cmsIdentity.CloudToken),
                     cancellationToken);
                 // Sequencia observada na copia instrumentada do VMS Pro atual.
                 await Task.Run(
@@ -249,6 +252,7 @@ public partial class MainWindow : Window
                     () => QueryAllAccountDeviceStates(devices), cancellationToken);
                 await Task.Delay(1200, cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
+                Log("Identidade interna da conta aplicada ao CMS.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
                 Log($"Estado de vinculo Cloud ativado: {bindCloudResult}.");
