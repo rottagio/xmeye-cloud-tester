@@ -1905,9 +1905,12 @@ public partial class MainWindow : Window
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
+        // O evento 7 informa apenas a resolucao anunciada e tambem aparece em
+        // streams pretos (como o Portao). O evento 37 so chegou, nesta build,
+        // depois que o renderizador recebeu imagem de fato; p4 e a janela.
         if (type == CmsSdk.MessageType.VideoWindowControl &&
-            p1 == 7 && p2 >= 0 && p3 > 0 && p4 > 0)
-            videoFrameConfirmations[p2] = Stopwatch.GetTimestamp();
+            p1 == 37 && p4 >= 0)
+            videoFrameConfirmations[p4] = Stopwatch.GetTimestamp();
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() =>
