@@ -763,6 +763,60 @@ public partial class MainWindow : Window
         videoGrid.ResumeLayout(performLayout: true);
     }
 
+    private void ArrangeProgressiveVideoGrid(
+        IReadOnlyCollection<int> visibleWindows, int requestedSlots)
+    {
+        int side = requestedSlots switch
+        {
+            <= 1 => 1,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => 4
+        };
+        int[] ordered = visibleWindows
+            .Where(window => window >= 0 && window < videoPanels.Count)
+            .Distinct()
+            .OrderBy(window => window)
+            .ToArray();
+        var visible = ordered.ToHashSet();
+
+        videoGrid.SuspendLayout();
+        for (int window = 0; window < videoPanels.Count; window++)
+        {
+            Forms.Control? container = videoPanels[window].Parent;
+            if (container is null || visible.Contains(window))
+                continue;
+            container.Visible = false;
+            if (videoGrid.Controls.Contains(container))
+                videoGrid.Controls.Remove(container);
+        }
+
+        videoGrid.ColumnStyles.Clear();
+        videoGrid.RowStyles.Clear();
+        videoGrid.ColumnCount = side;
+        videoGrid.RowCount = side;
+        for (int index = 0; index < side; index++)
+        {
+            videoGrid.ColumnStyles.Add(
+                new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / side));
+            videoGrid.RowStyles.Add(
+                new Forms.RowStyle(Forms.SizeType.Percent, 100F / side));
+        }
+
+        for (int position = 0; position < ordered.Length; position++)
+        {
+            Forms.Control? container = videoPanels[ordered[position]].Parent;
+            if (container is null)
+                continue;
+            container.Visible = true;
+            if (!videoGrid.Controls.Contains(container))
+                videoGrid.Controls.Add(container);
+            videoGrid.SetCellPosition(container, new Forms.TableLayoutPanelCellPosition(
+                position % side, position / side));
+        }
+        videoGrid.ResumeLayout(performLayout: true);
+    }
+
     private int[] RegisterVideoWindows(int count)
     {
         int registered = Math.Min(count, videoPanels.Count);
@@ -791,6 +845,162 @@ public partial class MainWindow : Window
     }
 
     private async void GridLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button button ||
+            !int.TryParse(button.Tag?.ToString(), out int slots) ||
+            slots is not (1 or 4 or 9 or 16) || accountDevices.Count == 0)
+            return;
+
+        SetCameraBusy(true);
+        try
+        {
+            await DisconnectVideoAsync(log: false);
+            ConfigureVideoGrid(slots);
+            ArrangeProgressiveVideoGrid(Array.Empty<int>(), slots);
+            VideoPlaceholder.Text = "Procurando a primeira camera disponivel...";
+            VideoPlaceholder.Visibility = Visibility.Visible;
+            deviceId = 0;
+
+            var devicesToTry = new List<(CloudApi.AccountDevice Device, int[] Channels)>();
+            if (slots == 1 && DeviceBox.SelectedItem is CloudApi.AccountDevice selected)
+            {
+                int channel = int.Parse(
+                    ((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
+                devicesToTry.Add((selected, [channel]));
+            }
+            else
+            {
+                IReadOnlyDictionary<string, int> channelCounts = ReadOfficialChannelCounts();
+                var channelSummary = new List<string>();
+                foreach (CloudApi.AccountDevice device in accountDevices)
+                {
+                    int declared = channelCounts.TryGetValue(
+                        NormalizeChannelCloudId(device.CloudId), out int count)
+                        ? count
+                        : 0;
+                    string name = string.IsNullOrWhiteSpace(device.Alias)
+                        ? "Camera"
+                        : device.Alias;
+                    channelSummary.Add(
+                        $"{name} {(declared > 0 ? declared : "desconhecido")}");
+                    int channelsToOpen = declared > 0 ? declared : 1;
+                    devicesToTry.Add((device,
+                        Enumerable.Range(0, channelsToOpen).ToArray()));
+                }
+                Log("Canais declarados pelo CMS: " +
+                    string.Join("; ", channelSummary) + ".");
+            }
+
+            int[] windowResults = RegisterVideoWindows(slots);
+            Log($"Abrindo grade {slots}: {devicesToTry.Count} cameras em sequencia; " +
+                $"stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
+
+            int opened = 0;
+            int rejected = 0;
+            int nextWindow = 0;
+            foreach ((CloudApi.AccountDevice device, int[] channels) in devicesToTry)
+            {
+                if (nextWindow >= slots)
+                    break;
+
+                string name = string.IsNullOrWhiteSpace(device.Alias)
+                    ? "Camera XMEye"
+                    : device.Alias;
+                Log($"Grade: testando {name}; canais declarados {channels.Length}.");
+
+                var info = new CmsSdk.DeviceInfo();
+                int found = 0;
+                int state = 0;
+                bool allowOptimisticPreview = false;
+                Stopwatch deviceTimer = Stopwatch.StartNew();
+                while (deviceTimer.Elapsed < TimeSpan.FromSeconds(30))
+                {
+                    qtRuntime.ProcessEvents();
+                    info = new CmsSdk.DeviceInfo();
+                    found = CmsSdk.CMS_Client_GetDeviceByCloudID(
+                        device.CloudId, 2, ref info);
+                    state = info.Error;
+                    if (info.ID > 0 &&
+                        automaticDeviceLoginResults.TryGetValue(
+                            info.ID, out int callbackState))
+                        state = callbackState;
+
+                    if (found != 0 && info.ID > 0 &&
+                        (info.LoginHandle > 0 || state > 0))
+                        break;
+                    if (found != 0 && info.ID > 0 && state is -7 or -8)
+                        break;
+                    if (found != 0 && info.ID > 0 && state == -25 &&
+                        deviceTimer.Elapsed >= TimeSpan.FromSeconds(5))
+                    {
+                        allowOptimisticPreview = true;
+                        break;
+                    }
+                    await Task.Delay(250);
+                }
+
+                bool ready = found != 0 && info.ID > 0 &&
+                    (info.LoginHandle > 0 || state > 0 || allowOptimisticPreview);
+                if (!ready)
+                {
+                    rejected += channels.Length;
+                    Log($"Grade: {name} pulada; login nao disponivel; estado {state}; " +
+                        $"{channels.Length} canal(is) ignorado(s).");
+                    continue;
+                }
+
+                foreach (int channel in channels)
+                {
+                    if (nextWindow >= slots)
+                        break;
+
+                    SetVideoLabel(nextWindow, device, channel);
+                    int previewResult = CmsSdk.CMS_Client_StartPreview(
+                        info.ID, nextWindow, channel,
+                        SubstreamBox.IsChecked == true
+                            ? CmsSdk.StreamType.Extra
+                            : CmsSdk.StreamType.Main,
+                        false);
+                    Log($"Grade: {name}; canal {channel + 1}; quadro {nextWindow + 1}; " +
+                        $"janela {windowResults[nextWindow]}; fluxo {previewResult}; estado {state}.");
+                    if (previewResult == 0)
+                    {
+                        videoLabels[nextWindow].Visible = false;
+                        rejected++;
+                        continue;
+                    }
+
+                    activePreviewWindows.Add(nextWindow);
+                    opened++;
+                    nextWindow++;
+                    ArrangeProgressiveVideoGrid(activePreviewWindows, slots);
+                    VideoPlaceholder.Visibility = Visibility.Collapsed;
+                    await Task.Delay(350);
+                }
+            }
+
+            playing = activePreviewWindows.Count > 0;
+            DisconnectButton.IsEnabled = playing;
+            VideoPlaceholder.Text = playing
+                ? string.Empty
+                : "Nenhuma camera respondeu nesta tentativa";
+            VideoPlaceholder.Visibility = playing
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+            Log($"GRADE {slots} CONCLUIDA EM SEQUENCIA: fluxos visiveis {opened}; " +
+                $"canais ignorados/recusados {rejected}.");
+        }
+        catch (Exception ex)
+        {
+            Log("ERRO AO ABRIR A GRADE: " + ex.Message);
+        }
+        finally
+        {
+            SetCameraBusy(false);
+        }
+    }
+
+    private async void GridLayoutLegacy_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not System.Windows.Controls.Button button ||
             !int.TryParse(button.Tag?.ToString(), out int slots) ||
