@@ -21,7 +21,14 @@ public partial class MainWindow : Window
         internal static extern bool SetDllDirectory(string path);
     }
 
-    private readonly Forms.Panel videoPanel = new() { BackColor = System.Drawing.Color.Black };
+    private readonly Forms.TableLayoutPanel videoGrid = new()
+    {
+        BackColor = System.Drawing.Color.Black,
+        Dock = Forms.DockStyle.Fill,
+        CellBorderStyle = Forms.TableLayoutPanelCellBorderStyle.Single
+    };
+    private readonly List<Forms.Panel> videoPanels = [];
+    private readonly HashSet<int> activePreviewWindows = [];
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
@@ -53,7 +60,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         Version version = typeof(MainWindow).Assembly.GetName().Version ?? new Version(0, 0);
         VersionText.Text = $"Versao {version.Major}.{version.Minor}.{version.Build}";
-        VideoHost.Child = videoPanel;
+        VideoHost.Child = videoGrid;
+        ConfigureVideoGrid(1);
         Loaded += OnLoaded;
         Closing += OnClosing;
         Log($"Diagnostico iniciado: sessao {diagnosticSession}; versao {version.Major}.{version.Minor}.{version.Build}; " +
@@ -269,6 +277,7 @@ public partial class MainWindow : Window
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;
                 DeviceBox.IsEnabled = accountDevices.Count > 0;
+                SetGridButtonsEnabled(accountDevices.Count > 0);
                 ForgetAccountButton.IsEnabled = true;
                 if (accountDevices.Count > 0)
                 {
@@ -362,6 +371,7 @@ public partial class MainWindow : Window
             accountDevices.AddRange(devices);
             DeviceBox.ItemsSource = accountDevices;
             DeviceBox.IsEnabled = accountDevices.Count > 0;
+            SetGridButtonsEnabled(accountDevices.Count > 0);
             ForgetAccountButton.IsEnabled = true;
             AccountPasswordBox.Clear();
             CaptchaBox.Clear();
@@ -471,6 +481,170 @@ public partial class MainWindow : Window
         _ => "erro retornado pelo serviço HTTPS da XMEye"
     };
 
+    private void ConfigureVideoGrid(int slots)
+    {
+        int side = slots switch
+        {
+            <= 1 => 1,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => 4
+        };
+
+        videoGrid.SuspendLayout();
+        foreach (Forms.Panel panel in videoPanels.ToArray())
+            panel.Dispose();
+        videoGrid.Controls.Clear();
+        videoGrid.ColumnStyles.Clear();
+        videoGrid.RowStyles.Clear();
+        videoGrid.ColumnCount = side;
+        videoGrid.RowCount = side;
+        for (int index = 0; index < side; index++)
+        {
+            videoGrid.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / side));
+            videoGrid.RowStyles.Add(new Forms.RowStyle(Forms.SizeType.Percent, 100F / side));
+        }
+
+        videoPanels.Clear();
+        for (int index = 0; index < side * side; index++)
+        {
+            var panel = new Forms.Panel
+            {
+                BackColor = System.Drawing.Color.Black,
+                Dock = Forms.DockStyle.Fill,
+                Margin = new Forms.Padding(1)
+            };
+            videoPanels.Add(panel);
+            videoGrid.Controls.Add(panel, index % side, index / side);
+        }
+        videoGrid.ResumeLayout(performLayout: true);
+    }
+
+    private async void GridLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button button ||
+            !int.TryParse(button.Tag?.ToString(), out int slots) ||
+            slots is not (1 or 4 or 9 or 16) || accountDevices.Count == 0)
+            return;
+
+        SetCameraBusy(true);
+        try
+        {
+            DisconnectVideo(log: false);
+            ConfigureVideoGrid(slots);
+            VideoPlaceholder.Visibility = Visibility.Collapsed;
+            deviceId = 0;
+
+            var requests = new List<(CloudApi.AccountDevice Device, int Channel)>();
+            if (slots == 1 && DeviceBox.SelectedItem is CloudApi.AccountDevice selected)
+            {
+                int channel = int.Parse(((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
+                requests.Add((selected, channel));
+            }
+            else
+            {
+                requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
+                    .Select(device => (device, 0)));
+                if (slots == 16)
+                {
+                    // A lista HTTP não informa de forma confiável quais modelos
+                    // possuem duas lentes. Os sete espaços restantes testam o
+                    // canal 1, preservando a mesma ordem da conta.
+                    requests.AddRange(accountDevices.Take(16 - requests.Count)
+                        .Select(device => (device, 1)));
+                }
+            }
+
+            Log($"Abrindo grade {slots}: {requests.Count} tentativas em ordem; " +
+                $"stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
+            int opened = 0;
+            int rejected = 0;
+            var completedWindows = new HashSet<int>();
+            Stopwatch loginTimer = Stopwatch.StartNew();
+            while (completedWindows.Count < requests.Count &&
+                   loginTimer.Elapsed < TimeSpan.FromSeconds(30))
+            {
+                qtRuntime.ProcessEvents();
+                for (int window = 0; window < requests.Count && window < videoPanels.Count; window++)
+                {
+                    if (completedWindows.Contains(window))
+                        continue;
+
+                    (CloudApi.AccountDevice device, int channel) = requests[window];
+                    var info = new CmsSdk.DeviceInfo();
+                    int found = CmsSdk.CMS_Client_GetDeviceByCloudID(device.CloudId, 2, ref info);
+                    int state = info.Error;
+                    if (info.ID > 0 && automaticDeviceLoginResults.TryGetValue(info.ID, out int callbackState))
+                        state = callbackState;
+
+                    if (found == 0 || info.ID <= 0)
+                    {
+                        completedWindows.Add(window);
+                        rejected++;
+                        Log($"Grade: quadro {window + 1}; cadastro nao localizado; canal {channel}.");
+                        continue;
+                    }
+
+                    if (info.LoginHandle <= 0 && state < 0)
+                    {
+                        completedWindows.Add(window);
+                        rejected++;
+                        Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
+                            $"login recusado; estado {state}.");
+                        continue;
+                    }
+
+                    if (info.LoginHandle <= 0 && state == 0)
+                        continue;
+
+                    int hwnd = unchecked((int)videoPanels[window].Handle.ToInt64());
+                    int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(window, hwnd, 0);
+                    int previewResult = CmsSdk.CMS_Client_StartPreview(
+                        info.ID, window, channel,
+                        SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
+                        false);
+                    completedWindows.Add(window);
+                    Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
+                        $"janela {windowResult}; fluxo {previewResult}; estado {state}.");
+                    if (previewResult != 0)
+                    {
+                        activePreviewWindows.Add(window);
+                        opened++;
+                    }
+                    else
+                    {
+                        rejected++;
+                    }
+                    await Task.Delay(150);
+                }
+                if (completedWindows.Count < requests.Count)
+                    await Task.Delay(250);
+            }
+
+            for (int window = 0; window < requests.Count; window++)
+            {
+                if (completedWindows.Contains(window))
+                    continue;
+                completedWindows.Add(window);
+                rejected++;
+                Log($"Grade: quadro {window + 1}; login automatico ainda pendente apos 30 segundos.");
+            }
+
+            playing = activePreviewWindows.Count > 0;
+            DisconnectButton.IsEnabled = playing;
+            VideoPlaceholder.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
+            Log($"GRADE {slots} INICIADA: fluxos aceitos {opened}; quadros ignorados/recusados {rejected}.");
+        }
+        catch (Exception ex)
+        {
+            Log("ERRO AO ABRIR A GRADE: " + ex.Message);
+        }
+        finally
+        {
+            SetCameraBusy(false);
+        }
+    }
+
     private async void OpenCamera_Click(object sender, RoutedEventArgs e)
     {
         if (DeviceBox.SelectedItem is not CloudApi.AccountDevice selected)
@@ -485,6 +659,7 @@ public partial class MainWindow : Window
         try
         {
             DisconnectVideo(log: false);
+            ConfigureVideoGrid(1);
             var result = await ConnectSelectedDeviceAsync(selected);
 
             if (!result.Ok)
@@ -504,7 +679,7 @@ public partial class MainWindow : Window
 
             deviceId = result.Info.ID;
             int channel = selectedChannel;
-            int hwnd = unchecked((int)videoPanel.Handle.ToInt64());
+            int hwnd = unchecked((int)videoPanels[0].Handle.ToInt64());
             int windowResult = CmsSdk.CMS_Client_CreatePlayWindow(0, hwnd, 0);
             previewLoginError = 0;
             int previewResult = CmsSdk.CMS_Client_StartPreview(
@@ -529,6 +704,7 @@ public partial class MainWindow : Window
                 Log($"FALHA AO CONFIRMAR O VÍDEO — código {loginError}: {detail}.");
                 return;
             }
+            activePreviewWindows.Add(0);
             playing = true;
             VideoPlaceholder.Visibility = Visibility.Collapsed;
             DisconnectButton.IsEnabled = true;
@@ -849,17 +1025,20 @@ public partial class MainWindow : Window
         DeviceBox.ItemsSource = null;
         DeviceBox.IsEnabled = false;
         OpenCameraButton.IsEnabled = false;
+        SetGridButtonsEnabled(false);
         accountDevices.Clear();
         automaticDeviceLoginResults.Clear();
     }
 
     private void DisconnectVideo(bool log)
     {
-        if (playing)
+        foreach (int window in activePreviewWindows.ToArray())
         {
-            CmsSdk.CMS_Client_StopPreviewByWnd(0, 0);
-            playing = false;
+            try { CmsSdk.CMS_Client_StopPreviewByWnd(window, 0); }
+            catch { }
         }
+        activePreviewWindows.Clear();
+        playing = false;
         // O VMS encerra somente o preview e preserva o login automatico do
         // dispositivo para que outra camera possa ser aberta imediatamente.
         deviceId = 0;
@@ -879,6 +1058,13 @@ public partial class MainWindow : Window
     {
         OpenCameraButton.IsEnabled = !busy && DeviceBox.SelectedItem is CloudApi.AccountDevice;
         OpenCameraButton.Content = busy ? "CONECTANDO..." : "ABRIR CÂMERA SELECIONADA";
+        SetGridButtonsEnabled(!busy && accountDevices.Count > 0);
+    }
+
+    private void SetGridButtonsEnabled(bool enabled)
+    {
+        foreach (UIElement element in GridButtonsPanel.Children)
+            element.IsEnabled = enabled;
     }
 
     private void DisableAccountLogin()

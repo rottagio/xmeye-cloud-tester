@@ -86,7 +86,15 @@
             <ComboBoxItem Content="2"/><ComboBoxItem Content="3"/>
           </ComboBox>
           <CheckBox x:Name="SubstreamBox" Content="Usar fluxo leve (SD)" IsChecked="True"
-                    Foreground="#CAD6E8" Margin="0,0,0,20"/>
+                    Foreground="#CAD6E8" Margin="0,0,0,10"/>
+
+          <TextBlock Text="Quantidade de telas" Foreground="#CAD6E8"/>
+          <UniformGrid x:Name="GridButtonsPanel" Columns="4" Margin="0,6,0,20">
+            <Button Content="1" Tag="1" Height="32" Margin="0,0,4,0" IsEnabled="False" Click="GridLayout_Click"/>
+            <Button Content="4" Tag="4" Height="32" Margin="2,0" IsEnabled="False" Click="GridLayout_Click"/>
+            <Button Content="9" Tag="9" Height="32" Margin="2,0" IsEnabled="False" Click="GridLayout_Click"/>
+            <Button Content="16" Tag="16" Height="32" Margin="4,0,0,0" IsEnabled="False" Click="GridLayout_Click"/>
+          </UniformGrid>
 
           <Button x:Name="OpenCameraButton" Content="ABRIR CÂMERA SELECIONADA" Height="44"
                   IsEnabled="False" Background="#1E9B68" Foreground="White"
