@@ -77,6 +77,10 @@ internal static class CmsSdk
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_StartCheckDevLink();
 
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CMS_Client_EnableAutoModDeviceIP(
+        [MarshalAs(UnmanagedType.I1)] bool enabled);
+
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_AddGroup(string name);
 

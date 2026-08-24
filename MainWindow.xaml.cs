@@ -253,6 +253,9 @@ public partial class MainWindow : Window
                 int deviceLinkMonitor = await Task.Run(
                     () => CmsSdk.CMS_Client_StartCheckDevLink(),
                     cancellationToken);
+                await Task.Run(
+                    () => CmsSdk.CMS_Client_EnableAutoModDeviceIP(true),
+                    cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log("Identidade interna da conta aplicada ao CMS.");
                 Log(importedVmsCredentials
@@ -261,6 +264,7 @@ public partial class MainWindow : Window
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
                 Log($"Monitor oficial de vinculo dos dispositivos iniciado: {deviceLinkMonitor}.");
+                Log("Atualizacao automatica dos cadastros ativada como no VMS Pro.");
                 cloudAccessToken = status.AccessToken;
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;

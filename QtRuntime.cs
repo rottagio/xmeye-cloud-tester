@@ -22,13 +22,13 @@ internal sealed class QtRuntime : IDisposable
         QApplicationConstructor(application, ref argc, argv, 0);
         eventPump = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(10)
+            Interval = TimeSpan.FromMilliseconds(25)
         };
         eventPump.Tick += PumpEvents;
         eventPump.Start();
     }
 
-    internal void ProcessEvents() => QCoreApplicationProcessEvents(0, 5);
+    internal void ProcessEvents() => QCoreApplicationProcessEvents(0, 1);
 
     private void PumpEvents(object? sender, EventArgs e) => ProcessEvents();
 
