@@ -216,6 +216,7 @@ public partial class MainWindow : Window
                 QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
                 Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
 
+                EnsureCmsCloudUserStore(status.LocalUser);
                 int linkedSession = await Task.Run(
                     () => CmsSdk.CMS_Client_UserLogin(
                         status.LocalUser, status.LocalPassword, 1, IntPtr.Zero),
@@ -639,11 +640,44 @@ public partial class MainWindow : Window
         // contem somente o usuario local padrao e nenhuma conta/camera Cloud.
         const string compressedTemplate =
             "H4sIAAAAAAAEAO3by07CQBQG4DPUIJoo7mZnZuECQjUYvLAxscKgjVixtiasSJWqTQSUlqg79d1c+g4+hbrTod7RxMSd5v8y08mZdk7a2Z023d6qBpEv9jvdlheJAk0QY7QsBBElVB+id+yb+CcJmpm6GEs/kDZ+TWmevlEDAAAAAAAAwO/UtCTP5Vg98naP/PDkSFW0jdA/6fntvcFwqGRLw5HCMVaqUgyczLS9lq+rKHtZYMOcc3Yl45xu6HfD+JD4tD6eEhmzLEzLkavSFjXb3DDsuliXdWG4zqZpqQUb0nJ0S+UWO4ZdWjPszMJcVlibjrDcalW4lrnlSr3mheFpp9v8eJHunB/7b8lfV+h2cHAYfZnOZhNJvsQZBe2mf/bybF4v6sRxI77Zxmw8aGrXUv2tG1OdpW9JNQAAAAAAAAD4oyZZkvh0SvOaraBdKSzkS/lyeXZxbr5YrBj0+DhK/fr/nlQDAAAAAAAAgP8lpfGR+JXA8/f/O1INAAAAAAAAAP6VFFP1f/wjwBOhU8RIAEAAAA==";
-        byte[] compressed = Convert.FromBase64String(compressedTemplate);
+        WriteCompressedTemplate(usersDatabase, compressedTemplate);
+    }
+
+    private static void EnsureCmsCloudUserStore(string cloudUser)
+    {
+        if (string.IsNullOrWhiteSpace(cloudUser) ||
+            cloudUser.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+            throw new InvalidOperationException("A identidade tecnica do QR nao pode formar o banco Cloud.");
+
+        string dataDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "XMEyeCloudAccountTester");
+        string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
+        Directory.CreateDirectory(cloudDirectory);
+        string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
+        if (!File.Exists(devicesDatabase))
+        {
+            // Esquema vazio extraido do devices.db oficial: Devices, Groups e
+            // sqlite_sequence, sem cameras, nomes, seriais ou credenciais.
+            const string compressedTemplate =
+                "H4sIABiPi2oC/+3Xz0/CMBQH8A2InDDeCOHSIwtLTEA4W8eCi2PAHCSczHQVF8cK29B4NCae/Y+18nsYEq+a7yfZmr627627veu+6SeM3PNo4iakLp1IsiydEyIt5aStzN5cln6pIJ5s4UM67hc+xQAAAAAAAADCJJsvlkryayNxbwPWjvh8Gi/fOc3WqaMTh16YOlnGSMVoEcNy9LZuk55tdKg9Ilf6iNCB0zUscaKjW45quRNGhtTWLqldaZ4pxOo6xBqYptLLHBWrVXm0qBbPAtEL3sRsNmfh3f40m6q/t1gJRQlVzJQ3Vc4Xy2X5/XSRs8WefJFqNWRSOVbBX15iceOdnes7HL6dSj0vYnG8WazXFLXHo+RnDi3gc08k30mjdqiWOjmIWXS4Vs+N42ceeZvVWqOpqDR0Az7WHtxwXVNt+WM/cYNUjAZuNEnvWvwb52XKNiGTj/1wN7ItPmShx6N0OiOczpNUTuLwRxamPlD57s1F0w8AAAAAAAAA/xj6fwAAAAAAAAD0/wAAAAAAAADw930BfhKd9QBAAAA=";
+            WriteCompressedTemplate(devicesDatabase, compressedTemplate);
+        }
+
+        string sourceConfig = Path.Combine(dataDirectory, "config.ini");
+        string cloudConfig = Path.Combine(cloudDirectory, "config.ini");
+        if (File.Exists(sourceConfig) && !File.Exists(cloudConfig))
+            File.Copy(sourceConfig, cloudConfig);
+    }
+
+    private static void WriteCompressedTemplate(string path, string template)
+    {
+        byte[] compressed = Convert.FromBase64String(template);
         using var source = new MemoryStream(compressed);
         using var gzip = new System.IO.Compression.GZipStream(
             source, System.IO.Compression.CompressionMode.Decompress);
-        using var destination = File.Create(usersDatabase);
+        using var destination = File.Create(path);
         gzip.CopyTo(destination);
     }
 
