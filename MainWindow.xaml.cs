@@ -493,8 +493,8 @@ public partial class MainWindow : Window
         };
 
         videoGrid.SuspendLayout();
-        foreach (Forms.Panel panel in videoPanels.ToArray())
-            panel.Dispose();
+        foreach (Forms.Control control in videoGrid.Controls.Cast<Forms.Control>().ToArray())
+            control.Dispose();
         videoGrid.Controls.Clear();
         videoGrid.ColumnStyles.Clear();
         videoGrid.RowStyles.Clear();
@@ -510,27 +510,36 @@ public partial class MainWindow : Window
         videoLabels.Clear();
         for (int index = 0; index < side * side; index++)
         {
-            var panel = new Forms.Panel
+            var container = new Forms.Panel
             {
                 BackColor = System.Drawing.Color.Black,
                 Dock = Forms.DockStyle.Fill,
                 Margin = new Forms.Padding(1)
             };
+            var panel = new Forms.Panel
+            {
+                BackColor = System.Drawing.Color.Black,
+                Dock = Forms.DockStyle.Fill,
+                Margin = Forms.Padding.Empty
+            };
             var label = new Forms.Label
             {
-                AutoSize = true,
+                AutoEllipsis = true,
                 BackColor = System.Drawing.Color.Black,
+                Dock = Forms.DockStyle.Top,
                 ForeColor = System.Drawing.Color.White,
                 Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Bold),
-                Location = new System.Drawing.Point(6, 6),
+                Height = 26,
                 Padding = new Forms.Padding(5, 3, 5, 3),
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
                 UseMnemonic = false,
                 Visible = false
             };
-            panel.Controls.Add(label);
+            container.Controls.Add(panel);
+            container.Controls.Add(label);
             videoPanels.Add(panel);
             videoLabels.Add(label);
-            videoGrid.Controls.Add(panel, index % side, index / side);
+            videoGrid.Controls.Add(container, index % side, index / side);
         }
         videoGrid.ResumeLayout(performLayout: true);
     }
@@ -572,17 +581,24 @@ public partial class MainWindow : Window
             }
             else
             {
-                requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
-                    .Select(device => (device, 0)));
                 if (slots == 16)
                 {
                     // A lista HTTP não informa de forma confiável quais modelos
-                    // possuem duas lentes. Os sete espaços restantes testam o
-                    // canal 1, preservando a mesma ordem da conta.
-                    requests.AddRange(accountDevices.Take(16 - requests.Count)
-                        .Select(device => (device, 1)));
+                    // possuem duas lentes. Preserva as mesmas 16 tentativas da
+                    // versao anterior, mas mostra os canais 1/2 consecutivos.
+                    for (int index = 0; index < accountDevices.Count; index++)
+                    {
+                        requests.Add((accountDevices[index], 0));
+                        if (index < 7)
+                            requests.Add((accountDevices[index], 1));
+                    }
                 }
+                else
+                    requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
+                        .Select(device => (device, 0)));
             }
+            if (requests.Count > slots)
+                requests.RemoveRange(slots, requests.Count - slots);
 
             for (int window = 0; window < requests.Count && window < videoLabels.Count; window++)
                 SetVideoLabel(window, requests[window].Device, requests[window].Channel);
