@@ -29,7 +29,13 @@ public partial class MainWindow : Window
     };
     private readonly List<Forms.Panel> videoPanels = [];
     private readonly List<Forms.Label> videoLabels = [];
+    private readonly List<Forms.Panel> videoContainers = [];
     private readonly HashSet<int> activePreviewWindows = [];
+    private readonly ConcurrentDictionary<int, PreviewBinding> previewBindings = new();
+    private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
+    private readonly ConcurrentDictionary<int, byte> failedPreviewWindows = new();
+    private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
+    private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
@@ -49,6 +55,9 @@ public partial class MainWindow : Window
     private string cloudAccessToken = string.Empty;
     private volatile int previewLoginError;
     private bool isClosing;
+
+    private sealed record PreviewBinding(
+        int DeviceId, int Window, int Channel, CmsSdk.StreamType StreamType);
 
     public MainWindow()
     {
@@ -664,6 +673,7 @@ public partial class MainWindow : Window
 
         videoPanels.Clear();
         videoLabels.Clear();
+        videoContainers.Clear();
         for (int index = 0; index < side * side; index++)
         {
             var container = new Forms.Panel
@@ -695,9 +705,70 @@ public partial class MainWindow : Window
             container.Controls.Add(label);
             videoPanels.Add(panel);
             videoLabels.Add(label);
+            videoContainers.Add(container);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
         videoGrid.ResumeLayout(performLayout: true);
+    }
+
+    private void CompactVideoGrid(int visibleSlots)
+    {
+        if (visibleSlots <= 0 || videoContainers.Count == 0)
+            return;
+
+        int maxSide = (int)Math.Sqrt(videoContainers.Count);
+        int columns = 1;
+        int rows = visibleSlots;
+        int bestEmpty = int.MaxValue;
+        int bestShape = int.MaxValue;
+        for (int candidateColumns = 1; candidateColumns <= maxSide; candidateColumns++)
+        {
+            int candidateRows = (int)Math.Ceiling((double)visibleSlots / candidateColumns);
+            if (candidateRows > maxSide)
+                continue;
+            int empty = candidateColumns * candidateRows - visibleSlots;
+            int shape = Math.Abs(candidateColumns - candidateRows);
+            if (empty < bestEmpty || empty == bestEmpty && shape < bestShape)
+            {
+                columns = candidateColumns;
+                rows = candidateRows;
+                bestEmpty = empty;
+                bestShape = shape;
+            }
+        }
+
+        videoGrid.SuspendLayout();
+        for (int index = 0; index < videoContainers.Count; index++)
+        {
+            Forms.Panel container = videoContainers[index];
+            videoGrid.SetColumnSpan(container, 1);
+            if (index < visibleSlots)
+            {
+                videoGrid.SetColumn(container, index % columns);
+                videoGrid.SetRow(container, index / columns);
+                container.Visible = true;
+            }
+            else
+                container.Visible = false;
+        }
+
+        int remainder = visibleSlots % columns;
+        if (remainder != 0)
+        {
+            Forms.Panel last = videoContainers[visibleSlots - 1];
+            videoGrid.SetColumnSpan(last, columns - remainder + 1);
+        }
+
+        videoGrid.ColumnStyles.Clear();
+        videoGrid.RowStyles.Clear();
+        videoGrid.ColumnCount = columns;
+        videoGrid.RowCount = rows;
+        for (int index = 0; index < columns; index++)
+            videoGrid.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / columns));
+        for (int index = 0; index < rows; index++)
+            videoGrid.RowStyles.Add(new Forms.RowStyle(Forms.SizeType.Percent, 100F / rows));
+        videoGrid.ResumeLayout(performLayout: true);
+        Log($"Grade compactada sem mover janelas nativas: {visibleSlots} fluxos em {columns}x{rows}.");
     }
 
     private int[] RegisterVideoWindows(int count)
@@ -750,142 +821,102 @@ public partial class MainWindow : Window
             }
             else
             {
-                if (slots == 16)
+                // Testa os canais em ordem e só ocupa um quadro quando o SDK
+                // confirmar imagem. Assim câmeras simples não deixam um canal 2
+                // preto e câmeras indisponíveis não reservam espaço na grade.
+                for (int index = 0; index < accountDevices.Count; index++)
                 {
-                    // A lista HTTP não informa de forma confiável quais modelos
-                    // possuem duas lentes. Preserva as mesmas 16 tentativas da
-                    // versao anterior, mas mostra os canais 1/2 consecutivos.
-                    for (int index = 0; index < accountDevices.Count; index++)
-                    {
-                        requests.Add((accountDevices[index], 0));
-                        if (index < 7)
-                            requests.Add((accountDevices[index], 1));
-                    }
+                    requests.Add((accountDevices[index], 0));
+                    requests.Add((accountDevices[index], 1));
                 }
-                else
-                    requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
-                        .Select(device => (device, 0)));
             }
-            if (requests.Count > slots)
-                requests.RemoveRange(slots, requests.Count - slots);
-
-            int[] windowResults = RegisterVideoWindows(requests.Count);
-
-            for (int window = 0; window < requests.Count && window < videoLabels.Count; window++)
-                SetVideoLabel(window, requests[window].Device, requests[window].Channel);
-
-            Log($"Abrindo grade {slots}: {requests.Count} tentativas em ordem; " +
+            int[] windowResults = RegisterVideoWindows(slots);
+            Log($"Abrindo grade {slots}: {requests.Count} candidatos em sequencia; " +
                 $"stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
             int opened = 0;
             int rejected = 0;
-            var completedWindows = new HashSet<int>();
-            var optimisticPreviewAttempts = new HashSet<int>();
-            var emptyCredentialRetries = new HashSet<string>(StringComparer.Ordinal);
-            var lastLoginStates = new Dictionary<int, int>();
+            int destinationWindow = 0;
+            var pending = new List<(CloudApi.AccountDevice Device, int Channel)>(requests);
+            var rejectionLogged = new HashSet<string>(StringComparer.Ordinal);
+            var retryAfter = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
             Stopwatch loginTimer = Stopwatch.StartNew();
-            while (completedWindows.Count < requests.Count &&
+            CmsSdk.StreamType streamType = SubstreamBox.IsChecked == true
+                ? CmsSdk.StreamType.Extra
+                : CmsSdk.StreamType.Main;
+
+            while (destinationWindow < slots && pending.Count > 0 &&
                    loginTimer.Elapsed < TimeSpan.FromSeconds(60))
             {
                 qtRuntime.ProcessEvents();
-                for (int window = 0; window < requests.Count && window < videoPanels.Count; window++)
+                bool progressed = false;
+                foreach ((CloudApi.AccountDevice device, int channel) in pending.ToArray())
                 {
-                    if (completedWindows.Contains(window))
+                    string candidateKey = device.CloudId + ":" + channel;
+                    if (retryAfter.TryGetValue(candidateKey, out TimeSpan nextAttempt) &&
+                        loginTimer.Elapsed < nextAttempt)
                         continue;
-
-                    (CloudApi.AccountDevice device, int channel) = requests[window];
                     var info = new CmsSdk.DeviceInfo();
                     int found = CmsSdk.CMS_Client_GetDeviceByCloudID(device.CloudId, 2, ref info);
                     int state = info.Error;
                     if (info.ID > 0 && automaticDeviceLoginResults.TryGetValue(info.ID, out int callbackState))
                         state = callbackState;
-                    lastLoginStates[window] = state;
 
                     if (found == 0 || info.ID <= 0)
                     {
-                        completedWindows.Add(window);
+                        pending.Remove((device, channel));
                         rejected++;
-                        Log($"Grade: quadro {window + 1}; cadastro nao localizado; canal {channel}.");
+                        progressed = true;
+                        continue;
+                    }
+                    bool previewMayCompleteLogin = state == -25 &&
+                        loginTimer.Elapsed >= TimeSpan.FromSeconds(5);
+                    if (info.LoginHandle <= 0 && state <= 0 && !previewMayCompleteLogin)
+                    {
+                        if (state < 0 && rejectionLogged.Add(device.CloudId))
+                            Log($"Grade: {device.Alias}; login provisoriamente recusado ({state}); cadastro preservado.");
                         continue;
                     }
 
-                    // Nunca remove nem recria um cadastro recusado. O CMS grava
-                    // essas alteracoes no devices.db usado pelo VMS; repeticoes do
-                    // fallback destruíam justamente o cadastro/token que podia
-                    // autenticar em uma tentativa posterior.
-                    if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
-                        emptyCredentialRetries.Add(device.CloudId))
+                    pending.Remove((device, channel));
+                    SetVideoLabel(destinationWindow, device, channel);
+                    bool visible = await TryOpenConfirmedPreviewAsync(
+                        info.ID, destinationWindow, channel, streamType, TimeSpan.FromSeconds(15));
+                    Log($"Grade: {device.Alias}; canal {channel + 1}; quadro {destinationWindow + 1}; " +
+                        $"janela {windowResults[destinationWindow]}; confirmado {(visible ? 1 : 0)}.");
+                    if (visible)
                     {
-                        string name = string.IsNullOrWhiteSpace(device.Alias)
-                            ? "Camera XMEye"
-                            : device.Alias;
-                        Log($"Grade: {name}; dispositivo {info.ID} recusado com -7; " +
-                            "cadastro preservado; aguardando nova resposta do CMS.");
-                        continue;
-                    }
-
-                    // O CMS pode publicar um erro provisório e concluir o mesmo login
-                    // alguns segundos depois (por exemplo, -4 seguido de 1). O VMS Pro
-                    // mantém a tentativa viva; a grade deve fazer o mesmo até o prazo.
-                    if (info.LoginHandle <= 0 && state <= 0)
-                    {
-                        // Nesta versao do CMS, -25 pode ser publicado mesmo depois
-                        // de o NetSDK concluir o login por token. O VMS segue adiante
-                        // e deixa a abertura do canal confirmar a sessao. Fazemos o
-                        // mesmo uma unica vez, depois de dar tempo ao login nativo.
-                        if (state != -25 || loginTimer.Elapsed < TimeSpan.FromSeconds(5) ||
-                            !optimisticPreviewAttempts.Add(window))
-                            continue;
-
-                        int optimisticResult = CmsSdk.CMS_Client_StartPreview(
-                            info.ID, window, channel,
-                            SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
-                            false);
-                        videoLabels[window].BringToFront();
-                        Log($"Grade: quadro {window + 1}; estado intermediario -25; " +
-                            $"preview de confirmacao {optimisticResult}.");
-                        if (optimisticResult == 0)
-                            continue;
-
-                        completedWindows.Add(window);
-                        activePreviewWindows.Add(window);
                         opened++;
-                        await Task.Delay(150);
-                        continue;
-                    }
-
-                    int previewResult = CmsSdk.CMS_Client_StartPreview(
-                        info.ID, window, channel,
-                        SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
-                        false);
-                    videoLabels[window].BringToFront();
-                    completedWindows.Add(window);
-                    Log($"Grade: quadro {window + 1}; dispositivo tecnico {info.ID}; canal {channel}; " +
-                        $"janela {windowResults[window]}; fluxo {previewResult}; estado {state}.");
-                    if (previewResult != 0)
-                    {
-                        activePreviewWindows.Add(window);
-                        opened++;
+                        destinationWindow++;
                     }
                     else
                     {
-                        rejected++;
+                        videoLabels[destinationWindow].Visible = false;
+                        videoLabels[destinationWindow].Text = string.Empty;
+                        if (previewMayCompleteLogin &&
+                            loginTimer.Elapsed < TimeSpan.FromSeconds(55))
+                        {
+                            pending.Add((device, channel));
+                            retryAfter[candidateKey] = loginTimer.Elapsed + TimeSpan.FromSeconds(5);
+                            Log($"Grade: {device.Alias}; canal {channel + 1}; " +
+                                "preview ainda nao confirmou; nova tentativa sera feita.");
+                        }
+                        else
+                            rejected++;
                     }
-                    await Task.Delay(150);
+                    progressed = true;
+                    if (destinationWindow >= slots)
+                        break;
                 }
-                if (completedWindows.Count < requests.Count)
+                if (!progressed)
                     await Task.Delay(250);
             }
 
-            for (int window = 0; window < requests.Count; window++)
-            {
-                if (completedWindows.Contains(window))
-                    continue;
-                completedWindows.Add(window);
-                rejected++;
-                int finalState = lastLoginStates.TryGetValue(window, out int state) ? state : 0;
-                Log($"Grade: quadro {window + 1}; login nao concluido apos 60 segundos; " +
-                    $"ultimo estado {finalState}.");
-            }
+            rejected += pending.Count;
+            Log($"Grade preenchida em sequencia: {opened} fluxos confirmados; " +
+                $"{rejected} candidatos vazios, recusados ou pendentes.");
+
+            if (opened > 0)
+                CompactVideoGrid(opened);
 
             playing = activePreviewWindows.Count > 0;
             DisconnectButton.IsEnabled = playing;
@@ -899,6 +930,101 @@ public partial class MainWindow : Window
         finally
         {
             SetCameraBusy(false);
+        }
+    }
+
+    private async Task<bool> TryOpenConfirmedPreviewAsync(
+        int selectedDeviceId, int window, int channel,
+        CmsSdk.StreamType streamType, TimeSpan timeout)
+    {
+        confirmedPreviewWindows.TryRemove(window, out _);
+        failedPreviewWindows.TryRemove(window, out _);
+        previewBindings[window] = new PreviewBinding(
+            selectedDeviceId, window, channel, streamType);
+        int startResult = CmsSdk.CMS_Client_StartPreview(
+            selectedDeviceId, window, channel, streamType, false);
+        videoLabels[window].BringToFront();
+        if (startResult == 0)
+        {
+            previewBindings.TryRemove(window, out _);
+            return false;
+        }
+
+        Stopwatch timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
+        {
+            qtRuntime.ProcessEvents();
+            if (confirmedPreviewWindows.ContainsKey(window))
+            {
+                activePreviewWindows.Add(window);
+                return true;
+            }
+            if (failedPreviewWindows.ContainsKey(window))
+                break;
+            await Task.Delay(100);
+        }
+
+        try { CmsSdk.CMS_Client_StopPreviewByWnd(window, 0); }
+        catch { }
+        previewBindings.TryRemove(window, out _);
+        confirmedPreviewWindows.TryRemove(window, out _);
+        failedPreviewWindows.TryRemove(window, out _);
+        await Task.Delay(250);
+        return false;
+    }
+
+    private async Task RecoverDevicePreviewsAsync(int recoveredDeviceId)
+    {
+        PreviewBinding[] bindings = previewBindings.Values
+            .Where(binding => binding.DeviceId == recoveredDeviceId)
+            .OrderBy(binding => binding.Window)
+            .ToArray();
+        await Task.WhenAll(bindings.Select(RecoverPreviewAsync));
+    }
+
+    private async Task RecoverPreviewAsync(PreviewBinding binding)
+    {
+        Stopwatch recoveryTimer = Stopwatch.StartNew();
+        int attempt = 0;
+        recoveringPreviewWindows[binding.Window] = 0;
+        try
+        {
+            while (recoveryTimer.Elapsed < TimeSpan.FromSeconds(60))
+            {
+                attempt++;
+                confirmedPreviewWindows.TryRemove(binding.Window, out _);
+                failedPreviewWindows.TryRemove(binding.Window, out _);
+                int result = CmsSdk.CMS_Client_StartPreview(
+                    binding.DeviceId, binding.Window, binding.Channel, binding.StreamType, false);
+                Log($"Recuperacao do preview: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                    $"janela {binding.Window}; tentativa {attempt}; retorno {result}.");
+                if (result != 0)
+                {
+                    Stopwatch confirmation = Stopwatch.StartNew();
+                    while (confirmation.Elapsed < TimeSpan.FromSeconds(30))
+                    {
+                        qtRuntime.ProcessEvents();
+                        if (confirmedPreviewWindows.ContainsKey(binding.Window))
+                        {
+                            Log($"Preview recuperado com imagem: dispositivo {binding.DeviceId}; " +
+                                $"canal {binding.Channel}; janela {binding.Window}.");
+                            return;
+                        }
+                        // Durante a retomada o SDK primeiro encerra o player antigo
+                        // (ChannelControl/VideoWindowControl = 1) e somente depois
+                        // entrega a nova resolucao. Esse aviso transitório não pode
+                        // cancelar a espera nem disparar StartPreview repetidamente.
+                        await Task.Delay(100);
+                    }
+                }
+                await Task.Delay(5000);
+            }
+            Log($"Recuperacao do preview esgotada: dispositivo {binding.DeviceId}; " +
+                $"canal {binding.Channel}; janela {binding.Window}.");
+        }
+        finally
+        {
+            recoveringPreviewWindows.TryRemove(binding.Window, out _);
         }
     }
 
@@ -1295,6 +1421,11 @@ public partial class MainWindow : Window
             catch { }
         }
         activePreviewWindows.Clear();
+        previewBindings.Clear();
+        confirmedPreviewWindows.Clear();
+        failedPreviewWindows.Clear();
+        recoveringPreviewWindows.Clear();
+        disconnectedPreviewDevices.Clear();
         playing = false;
         // O VMS encerra somente o preview e preserva o login automatico do
         // dispositivo para que outra camera possa ser aberta imediatamente.
@@ -1468,6 +1599,32 @@ public partial class MainWindow : Window
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
+        if (type == CmsSdk.MessageType.VideoWindowControl &&
+            p1 == 7 && p2 >= 0 && p3 > 0 && p4 > 0)
+        {
+            confirmedPreviewWindows[p2] = 0;
+            failedPreviewWindows.TryRemove(p2, out _);
+        }
+        else if (type == CmsSdk.MessageType.VideoWindowControl && p1 == 1 && p4 >= 0 &&
+                 !recoveringPreviewWindows.ContainsKey(p4))
+        {
+            confirmedPreviewWindows.TryRemove(p4, out _);
+            failedPreviewWindows[p4] = 0;
+        }
+        if (type == CmsSdk.MessageType.ChannelControl && p1 == 3 && p4 >= 0 &&
+            !recoveringPreviewWindows.ContainsKey(p4))
+        {
+            confirmedPreviewWindows.TryRemove(p4, out _);
+            failedPreviewWindows[p4] = 0;
+        }
+        if (type == CmsSdk.MessageType.DeviceControl && p1 == 4)
+        {
+            disconnectedPreviewDevices[p2] = 0;
+            foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
+                confirmedPreviewWindows.TryRemove(binding.Window, out _);
+        }
+        bool shouldRecover = type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 > 0 &&
+            disconnectedPreviewDevices.TryRemove(p2, out _);
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() =>
@@ -1476,6 +1633,11 @@ public partial class MainWindow : Window
                 p1 is 0 or 27 && p4 >= 0 && p4 < videoLabels.Count)
                 videoLabels[p4].BringToFront();
             Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.");
+            if (shouldRecover)
+            {
+                Log($"Dispositivo {p2} religado pelo CMS; reabrindo os previews associados.");
+                _ = RecoverDevicePreviewsAsync(p2);
+            }
         }));
     }
 
