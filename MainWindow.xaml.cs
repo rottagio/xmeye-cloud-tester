@@ -23,7 +23,6 @@ public partial class MainWindow : Window
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
     private readonly object diagnosticLock = new();
-    private readonly object deviceLoginLock = new();
     private readonly string diagnosticPath;
     private int deviceId;
     private bool playing;
@@ -35,8 +34,6 @@ public partial class MainWindow : Window
     private bool qrBusy;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
-    private int pendingDeviceId;
-    private TaskCompletionSource<int>? pendingDeviceLogin;
 
     public MainWindow()
     {
@@ -544,43 +541,11 @@ public partial class MainWindow : Window
         Log($"Preflight oficial de transporte: retorno {statusQuery}.");
         Log("Rota de transporte entregue ao NetSDK; o resultado real sera confirmado pelo login.");
 
-        var loginSignal = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (deviceLoginLock)
-        {
-            pendingDeviceId = info.ID;
-            pendingDeviceLogin = loginSignal;
-        }
-        try
-        {
-            CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, true);
-            for (int attempt = 0; attempt < 50; attempt++)
-            {
-                Task completed = await Task.WhenAny(loginSignal.Task, Task.Delay(400));
-                if (completed == loginSignal.Task)
-                {
-                    int error = await loginSignal.Task;
-                    CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                    return (false, error, info);
-                }
-                CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-                if (info.LoginHandle > 0)
-                    return (true, 0, info);
-                if (info.Error != 0)
-                    return (false, info.Error, info);
-            }
-            return (false, -3, info);
-        }
-        finally
-        {
-            lock (deviceLoginLock)
-            {
-                if (ReferenceEquals(pendingDeviceLogin, loginSignal))
-                {
-                    pendingDeviceLogin = null;
-                    pendingDeviceId = 0;
-                }
-            }
-        }
+        // O VMS funcional nao chama DeviceLoginOrLogout antes da visualizacao.
+        // StartPreview com openDevice=true inicia internamente o login Cloud e
+        // evita a recusa -7 produzida pela chamada manual antecipada.
+        Log("Dispositivo preparado; o login sera iniciado diretamente pela visualizacao.");
+        return (true, 0, info);
     }
 
     private (int Synchronized, int Failed) SynchronizeAccountDevicesToCms(
@@ -858,12 +823,6 @@ public partial class MainWindow : Window
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,
         IntPtr text1, IntPtr text2, uint size, IntPtr user)
     {
-        if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 != 0)
-        {
-            lock (deviceLoginLock)
-                if (p2 == pendingDeviceId)
-                    pendingDeviceLogin?.TrySetResult(p4);
-        }
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() => Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.")));
