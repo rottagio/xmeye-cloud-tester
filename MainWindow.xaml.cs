@@ -813,7 +813,9 @@ public partial class MainWindow : Window
                     // tamanho zero). A copia importada pode fazer esta build do CMS
                     // enviar a credencial armazenada diretamente e receber -7.
                     // Recria somente os dispositivos recusados, uma unica vez, com
-                    // senha vazia e preservando o token Cloud da conta.
+                    // senha e AdminToken vazios. Preservar o AdminToken fazia o SDK
+                    // reconstruir a credencial direta de 64 caracteres; o VMS usa
+                    // a identidade indireta da conta neste caminho (tamanho zero).
                     if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
                         emptyCredentialRetries.Add(device.CloudId))
                     {
@@ -827,7 +829,7 @@ public partial class MainWindow : Window
                             FormatCmsRegistrationId(device.CloudId),
                             device.DeviceUser,
                             string.Empty,
-                            device.AdminToken,
+                            string.Empty,
                             0,
                             name,
                             cloudGroupId,
@@ -835,8 +837,9 @@ public partial class MainWindow : Window
                         int statusResult = added > 0
                             ? XMEyeBridge.QueryDeviceStatus(device.CloudId)
                             : int.MinValue;
-                        Log($"Grade: dispositivo recusado com -7; fallback de credencial indireta: " +
-                            $"remocao {removed}; novo ID {added}; consulta {statusResult}.");
+                        Log($"Grade: {name}; dispositivo recusado com -7; " +
+                            $"fallback sem senha e sem AdminToken: remocao {removed}; " +
+                            $"novo ID {added}; consulta {statusResult}.");
                         continue;
                     }
 
