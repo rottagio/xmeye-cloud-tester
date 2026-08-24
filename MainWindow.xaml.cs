@@ -214,7 +214,7 @@ public partial class MainWindow : Window
                     () => QrCloudApi.InitializeAppInfo(challenge.Secret, status.AppInfoEnc),
                     cancellationToken);
                 QrCloudApi.AppIdentityDiagnostics identity = QrCloudApi.LastAppIdentityDiagnostics;
-                Log($"Identidade QR preparada: movecard {identity.MoveCard}; formato {identity.MoveCardKind}.");
+                Log($"Identidade QR preparada: movecard retornado {identity.ReturnedMoveCard}; aplicado {identity.AppliedMoveCard}; formato {identity.MoveCardKind}.");
 
                 QrCloudApi.CmsCloudIdentity cmsIdentity = await Task.Run(
                     () => QrCloudApi.GetCmsCloudIdentity(status.AccessToken),
@@ -274,6 +274,7 @@ public partial class MainWindow : Window
                     Log($"Vínculo das câmeras: próprias {accountDevices.Count - shared}; compartilhadas {shared}.");
                     QrCloudApi.CredentialParseDiagnostics parse = QrCloudApi.LastCredentialDiagnostics;
                     Log($"Estrutura protegida: powers {parse.PowersPresent}/{accountDevices.Count}; devInfo {parse.MarkerFound}; formato cifrado {parse.EncodedFormat}; campos decodificados {parse.FiveFields}; deviceToken {parse.DeviceTokenObjects}; AdminToken {parse.AdminTokenPresent}; PWDToken {parse.PwdTokenPresent}; tokens decifrados {parse.PwdTokenDecrypted}.");
+                    Log($"Credencial individual da lista: senha direta {parse.DirectPasswordPresent}/{accountDevices.Count}; tamanho oficial 16 em {parse.PasswordLength16}/{accountDevices.Count}.");
                     Log($"Credencial técnica do QR aplicada: usuário {parse.SessionUserFallback}; senha {parse.SessionPasswordFallback}.");
                     Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
                     Log($"Estados Cloud consultados em conjunto: {queriedStates}/{accountDevices.Count}.");
@@ -480,6 +481,7 @@ public partial class MainWindow : Window
                     -1 => "não foi possível cadastrar a câmera no motor local",
                     -2 => "a câmera não apareceu no motor local",
                     -3 => "tempo esgotado aguardando a conexão P2P",
+                    -7 => "a credencial técnica do dispositivo foi recusada",
                     -29 => "a autorização do dispositivo retornada pela nuvem foi recusada",
                     _ => "erro retornado pelo dispositivo ou pela nuvem"
                 };
@@ -592,10 +594,17 @@ public partial class MainWindow : Window
             int found = CmsSdk.CMS_Client_GetDeviceByCloudID(device.CloudId, 2, ref existing);
             if (found != 0 && existing.ID > 0)
             {
-                // O VMS preserva o cadastro persistente. Recria-lo apagava a
-                // autorizacao tecnica que nao vem na lista HTTP.
-                synchronized++;
-                continue;
+                // As versoes anteriores gravaram por engano o upass do QR
+                // (144 caracteres). Quando a lista devolver a credencial
+                // individual de 16 caracteres, substitui esse cadastro ruim.
+                // Sem uma senha individual confirmada, preserva o registro.
+                if (device.DevicePassword.Length != 16)
+                {
+                    synchronized++;
+                    continue;
+                }
+                CmsSdk.CMS_Client_DeviceLoginOrLogout(existing.ID, false);
+                CmsSdk.CMS_Client_RemoveDevice(existing.ID);
             }
 
             string name = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera XMEye" : device.Alias;

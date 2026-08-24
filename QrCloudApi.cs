@@ -19,15 +19,17 @@ internal static class QrCloudApi
         string LocalUser, string LocalPassword);
     internal sealed record DeviceTokenResult(int Code, string AdminToken);
     internal sealed record CmsCloudIdentity(string UserName, string Password, string CloudToken);
-    internal sealed record AppIdentityDiagnostics(int MoveCard, string MoveCardKind);
+    internal sealed record AppIdentityDiagnostics(
+        int ReturnedMoveCard, int AppliedMoveCard, string MoveCardKind);
     internal sealed record CredentialParseDiagnostics(
         int PowersPresent, int MarkerFound, int EncodedFormat, int FiveFields, int PasswordRecovered,
         int DeviceTokenObjects, int AdminTokenPresent, int PwdTokenPresent, int PwdTokenDecrypted,
+        int DirectPasswordPresent, int PasswordLength16,
         int SessionUserFallback, int SessionPasswordFallback);
     internal static CredentialParseDiagnostics LastCredentialDiagnostics { get; private set; } =
-        new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     internal static AppIdentityDiagnostics LastAppIdentityDiagnostics { get; private set; } =
-        new(0, "ausente");
+        new(0, 0, "ausente");
 
     private sealed class MutableCredentialDiagnostics
     {
@@ -40,6 +42,8 @@ internal static class QrCloudApi
         internal int AdminTokenPresent;
         internal int PwdTokenPresent;
         internal int PwdTokenDecrypted;
+        internal int DirectPasswordPresent;
+        internal int PasswordLength16;
         internal int SessionUserFallback = 0;
         internal int SessionPasswordFallback = 0;
     }
@@ -103,12 +107,16 @@ internal static class QrCloudApi
         string appId = GetString(root, "id");
         string uuid = GetString(root, "uuid");
         string secret = GetString(root, "secret");
-        int moveCard = ReadMoveCard(root, out string moveCardKind);
-        LastAppIdentityDiagnostics = new(moveCard, moveCardKind);
+        int returnedMoveCard = ReadMoveCard(root, out string moveCardKind);
+        // O VMS Pro para Windows foi instrumentado durante um login funcional:
+        // nas duas chamadas a CMS_Client_InitAppinfo ele aplica zero, mesmo
+        // quando o appInfo do QR informa movecard 2.
+        const int desktopMoveCard = 0;
+        LastAppIdentityDiagnostics = new(returnedMoveCard, desktopMoveCard, moveCardKind);
         if (appId.Length == 0 || uuid.Length == 0 || secret.Length == 0)
             throw new InvalidOperationException("A identidade retornada pelo QR está incompleta.");
 
-        int result = XMEyeBridge.InitAppInfo(appId, uuid, secret, moveCard);
+        int result = XMEyeBridge.InitAppInfo(appId, uuid, secret, desktopMoveCard);
         if (result != 0)
             throw new InvalidOperationException($"A identidade oficial do aplicativo não foi aceita ({result}).");
 
@@ -181,6 +189,8 @@ internal static class QrCloudApi
             diagnostics.AdminTokenPresent,
             diagnostics.PwdTokenPresent,
             diagnostics.PwdTokenDecrypted,
+            diagnostics.DirectPasswordPresent,
+            diagnostics.PasswordLength16,
             diagnostics.SessionUserFallback,
             diagnostics.SessionPasswordFallback);
         return devices;
@@ -345,6 +355,12 @@ internal static class QrCloudApi
         {
             string deviceUser = FirstString(element, "username", "userName", "user");
             string devicePassword = FirstString(element, "password", "passwd", "upass");
+            if (devicePassword.Length > 0)
+            {
+                diagnostics.DirectPasswordPresent++;
+                if (devicePassword.Length == 16)
+                    diagnostics.PasswordLength16++;
+            }
             string adminToken = string.Empty;
             if (deviceUser.Length == 0 || devicePassword.Length == 0)
             {
@@ -379,19 +395,15 @@ internal static class QrCloudApi
                 }
             }
 
-            // O devices.db produzido pelo VMS oficial conserva a credencial
-            // tecnica de 16 caracteres devolvida pelo QR, sem prefixo MD5_.
+            // A senha da sessao QR nao e a senha do dispositivo. O VMS grava
+            // somente a credencial individual devolvida na lista (ou derivada
+            // de powers/PWDToken). Reutilizar upass aqui criava senhas de 144
+            // caracteres no devices.db e o dispositivo recusava com -7.
             if (deviceUser.Length == 0 && sessionUser.Length > 0)
             {
                 deviceUser = sessionUser;
                 diagnostics.SessionUserFallback++;
             }
-            if (devicePassword.Length == 0 && sessionPassword.Length > 0)
-            {
-                devicePassword = sessionPassword;
-                diagnostics.SessionPasswordFallback++;
-            }
-
             devices.Add(new CloudApi.AccountDevice
             {
                 CloudId = cloudId,
