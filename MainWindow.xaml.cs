@@ -250,6 +250,9 @@ public partial class MainWindow : Window
                             status.AccessToken, status.LocalUser, status.LocalPassword),
                         cancellationToken);
                 (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
+                int deviceLinkMonitor = await Task.Run(
+                    () => CmsSdk.CMS_Client_StartCheckDevLink(),
+                    cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log("Identidade interna da conta aplicada ao CMS.");
                 Log(importedVmsCredentials
@@ -257,7 +260,7 @@ public partial class MainWindow : Window
                     : "Banco do VMS Pro nao localizado; usando somente os dados da nuvem.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
-                Log("Varredura automatica das credenciais iniciada pelo CMS.");
+                Log($"Monitor oficial de vinculo dos dispositivos iniciado: {deviceLinkMonitor}.");
                 cloudAccessToken = status.AccessToken;
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;
