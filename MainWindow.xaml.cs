@@ -779,6 +779,7 @@ public partial class MainWindow : Window
             int opened = 0;
             int rejected = 0;
             var completedWindows = new HashSet<int>();
+            var optimisticPreviewAttempts = new HashSet<int>();
             var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
@@ -810,7 +811,31 @@ public partial class MainWindow : Window
                     // alguns segundos depois (por exemplo, -4 seguido de 1). O VMS Pro
                     // mantém a tentativa viva; a grade deve fazer o mesmo até o prazo.
                     if (info.LoginHandle <= 0 && state <= 0)
+                    {
+                        // Nesta versao do CMS, -25 pode ser publicado mesmo depois
+                        // de o NetSDK concluir o login por token. O VMS segue adiante
+                        // e deixa a abertura do canal confirmar a sessao. Fazemos o
+                        // mesmo uma unica vez, depois de dar tempo ao login nativo.
+                        if (state != -25 || loginTimer.Elapsed < TimeSpan.FromSeconds(5) ||
+                            !optimisticPreviewAttempts.Add(window))
+                            continue;
+
+                        int optimisticResult = CmsSdk.CMS_Client_StartPreview(
+                            info.ID, window, channel,
+                            SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
+                            false);
+                        videoLabels[window].BringToFront();
+                        Log($"Grade: quadro {window + 1}; estado intermediario -25; " +
+                            $"preview de confirmacao {optimisticResult}.");
+                        if (optimisticResult == 0)
+                            continue;
+
+                        completedWindows.Add(window);
+                        activePreviewWindows.Add(window);
+                        opened++;
+                        await Task.Delay(150);
                         continue;
+                    }
 
                     int previewResult = CmsSdk.CMS_Client_StartPreview(
                         info.ID, window, channel,
