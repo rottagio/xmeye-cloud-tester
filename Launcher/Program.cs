@@ -12,22 +12,12 @@ internal static class Program
         try
         {
             string baseDirectory = AppContext.BaseDirectory;
-            bool manualUpdate = args.Contains("--manual-update", StringComparer.OrdinalIgnoreCase);
             int waitPid = ParseWaitPid(args);
             if (!args.Contains("--skip-update", StringComparer.OrdinalIgnoreCase))
             {
-                UpdateResult update = await UpdateService.CheckAndOfferAsync(baseDirectory, manualUpdate, waitPid);
+                UpdateResult update = await UpdateService.CheckAndInstallAsync(baseDirectory, waitPid);
                 if (update == UpdateResult.Installing)
                     return;
-            }
-
-            string? installedVersion = args.FirstOrDefault(argument =>
-                argument.StartsWith("--updated=", StringComparison.OrdinalIgnoreCase));
-            if (installedVersion is not null)
-            {
-                MessageBox.Show(
-                    $"Atualizacao concluida. Versao {installedVersion[10..]} instalada.",
-                    "XMEye Cloud Tester", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
 
             string application = Path.Combine(baseDirectory, "XMEyeCloudTester.App.exe");

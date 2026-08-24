@@ -22,8 +22,8 @@ internal static class UpdateService
 
     private static readonly HttpClient Http = CreateClient();
 
-    internal static async Task<UpdateResult> CheckAndOfferAsync(
-        string installDirectory, bool manualCheck = false, int waitPid = 0)
+    internal static async Task<UpdateResult> CheckAndInstallAsync(
+        string installDirectory, int waitPid = 0)
     {
         if (RepositoryOwner.StartsWith("__", StringComparison.Ordinal))
             return UpdateResult.None;
@@ -33,25 +33,6 @@ internal static class UpdateService
             ReleaseInfo? release = await GetLatestReleaseAsync();
             Version current = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
             if (release is null || release.Version <= current)
-            {
-                if (manualCheck)
-                {
-                    MessageBox.Show(
-                        $"Voce ja esta usando a versao mais recente ({current.Major}.{current.Minor}.{current.Build}).",
-                        "Atualizacao do XMEye Cloud Tester",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
-                }
-                return UpdateResult.None;
-            }
-
-            DialogResult answer = MessageBox.Show(
-                $"A versao {release.Version} esta disponivel.\n\n" +
-                "Deseja baixar e instalar agora? O aplicativo sera reaberto automaticamente.",
-                "Atualizacao do XMEye Cloud Tester",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Information);
-            if (answer != DialogResult.Yes)
                 return UpdateResult.None;
 
             string workDirectory = Path.Combine(
@@ -222,7 +203,7 @@ try {
     }
 
     Write-UpdateLog "Instalacao $Version concluida."
-    Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList @('--skip-update', "--updated=$Version") -WorkingDirectory $Destination
+    Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
     Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
