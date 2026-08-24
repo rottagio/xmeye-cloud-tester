@@ -929,9 +929,17 @@ public partial class MainWindow : Window
                     if (found != 0 && info.ID > 0 &&
                         (info.LoginHandle > 0 || state > 0))
                         break;
-                    if (found != 0 && info.ID > 0 && state is -7 or -8)
+                    // O callback de login do CMS nem sempre e definitivo. Ja
+                    // observamos dispositivos que renderizam video mesmo apos
+                    // um estado negativo/transitorio. Se o cadastro existe,
+                    // deixa o StartPreview e o callback de quadro real (37)
+                    // decidirem se o canal deve aparecer na grade.
+                    if (found != 0 && info.ID > 0 && state < 0)
+                    {
+                        allowOptimisticPreview = true;
                         break;
-                    if (found != 0 && info.ID > 0 && state == -25 &&
+                    }
+                    if (found != 0 && info.ID > 0 &&
                         deviceTimer.Elapsed >= TimeSpan.FromSeconds(5))
                     {
                         allowOptimisticPreview = true;
@@ -949,6 +957,9 @@ public partial class MainWindow : Window
                         $"{channels.Length} canal(is) ignorado(s).");
                     continue;
                 }
+                if (allowOptimisticPreview)
+                    Log($"Grade: {name}; cadastro localizado com estado {state}; " +
+                        "a imagem real decidira se cada canal sera exibido.");
 
                 foreach (int channel in channels)
                 {
