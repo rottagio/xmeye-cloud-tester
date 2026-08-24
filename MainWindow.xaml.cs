@@ -552,11 +552,17 @@ public partial class MainWindow : Window
                     $"ID {info.ID}; loginType {info.LoginType}; loginHandle positivo; erro {info.Error}.");
                 return (true, 0);
             }
-            if (info.Error != 0)
+            if (info.Error < 0)
             {
                 Log($"Confirmacao do preview recusada no ciclo {attempt + 1}/80: consulta {found}; " +
                     $"ID {info.ID}; loginType {info.LoginType}; loginHandle {info.LoginHandle}; erro {info.Error}.");
                 return (false, info.Error);
+            }
+            if (info.Error > 0)
+            {
+                Log($"Confirmacao do preview recebida no ciclo {attempt + 1}/80: consulta {found}; " +
+                    $"ID {info.ID}; estado positivo {info.Error}; aguardando os callbacks de video.");
+                return (true, 0);
             }
         }
         Log("Confirmacao do preview esgotou 80 ciclos em 20 segundos sem handle ou erro do cadastro.");
