@@ -9,14 +9,12 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
-using Microsoft.Data.Sqlite;
 using Forms = System.Windows.Forms;
 
 namespace XMEyeCloudTester;
 
 public partial class MainWindow : Window
 {
-    private const string CmsDataProfileName = "XMEyeCloudAccountTester-CMS-v2";
     private static class NativeMethods
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -32,7 +30,6 @@ public partial class MainWindow : Window
     private readonly List<Forms.Panel> videoPanels = [];
     private readonly List<Forms.Label> videoLabels = [];
     private readonly HashSet<int> activePreviewWindows = [];
-    private readonly ConcurrentDictionary<int, long> videoFrameConfirmations = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
@@ -50,7 +47,6 @@ public partial class MainWindow : Window
     private bool qrBusy;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
-    private string cmsDevicesDatabasePath = string.Empty;
     private volatile int previewLoginError;
     private bool isClosing;
 
@@ -94,7 +90,9 @@ public partial class MainWindow : Window
             Environment.SetEnvironmentVariable("QT_PLUGIN_PATH", plugins + ";" + baseDirectory);
             Environment.SetEnvironmentVariable("QT_QPA_PLATFORM_PLUGIN_PATH", Path.Combine(plugins, "platforms"));
 
-            string dataDirectory = GetCmsDataDirectory();
+            string dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "XMEyeCloudAccountTester-CMS-v3");
             Directory.CreateDirectory(dataDirectory);
             EnsureCmsDataLayout(dataDirectory);
             string sourceConfig = Path.Combine(baseDirectory, "config.ini");
@@ -122,7 +120,6 @@ public partial class MainWindow : Window
             QrCloudApi.ConfigureBrazilRegion();
 
             Log("Motor de video inicializado; banco local do CMS sera concluido apos o login QR.");
-            Log("Perfil local do CMS: limpo v2.");
 
             Log("Regiao Cloud: Brasil (SA).");
             Log("Verificacao automatica de estado: padrao interno do CMS (igual ao VMS Pro).");
@@ -195,11 +192,7 @@ public partial class MainWindow : Window
             IReadOnlyList<CloudApi.AccountDevice> devices = await Task.Run(
                 () => QrCloudApi.GetDevices(
                     saved.AccessToken, saved.LocalUser, saved.LocalPassword));
-            (int synchronized, int failed) = importedVmsCredentials
-                ? (devices.Count, 0)
-                : SynchronizeAccountDevicesToCms(devices);
-            if (importedVmsCredentials)
-                Log("Cadastros oficiais do VMS Pro preservados sem recriacao local.");
+            (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
             int deviceLinkMonitor = await Task.Run(
                 () => CmsSdk.CMS_Client_StartCheckDevLink());
             await Task.Run(() => CmsSdk.CMS_Client_EnableAutoModDeviceIP(true));
@@ -341,11 +334,7 @@ public partial class MainWindow : Window
                         () => QrCloudApi.GetDevices(
                             status.AccessToken, status.LocalUser, status.LocalPassword),
                         cancellationToken);
-                (int synchronized, int failed) = importedVmsCredentials
-                    ? (devices.Count, 0)
-                    : SynchronizeAccountDevicesToCms(devices);
-                if (importedVmsCredentials)
-                    Log("Cadastros oficiais do VMS Pro preservados sem recriacao local.");
+                (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
                 int deviceLinkMonitor = await Task.Run(
                     () => CmsSdk.CMS_Client_StartCheckDevLink(),
                     cancellationToken);
@@ -660,15 +649,7 @@ public partial class MainWindow : Window
         };
 
         videoGrid.SuspendLayout();
-        // Alguns containers recusados podem ter sido removidos da grade visual,
-        // mas continuam vivos para preservar os HWNDs durante os callbacks. Ao
-        // reconstruir, libera todos eles, estejam ou nao anexados a grade.
-        foreach (Forms.Control control in videoPanels
-            .Select(panel => panel.Parent)
-            .Where(parent => parent is not null)
-            .Distinct()
-            .Cast<Forms.Control>()
-            .ToArray())
+        foreach (Forms.Control control in videoGrid.Controls.Cast<Forms.Control>().ToArray())
             control.Dispose();
         videoGrid.Controls.Clear();
         videoGrid.ColumnStyles.Clear();
@@ -719,113 +700,6 @@ public partial class MainWindow : Window
         videoGrid.ResumeLayout(performLayout: true);
     }
 
-    private void CompactVideoGrid(IReadOnlyCollection<int> visibleWindows)
-    {
-        int[] ordered = visibleWindows
-            .Where(window => window >= 0 && window < videoPanels.Count)
-            .Distinct()
-            .OrderBy(window => window)
-            .ToArray();
-        int columns = ordered.Length switch
-        {
-            <= 1 => 1,
-            <= 4 => 2,
-            <= 9 => 3,
-            _ => 4
-        };
-        int rows = Math.Max(1, (int)Math.Ceiling(ordered.Length / (double)columns));
-        var visible = ordered.ToHashSet();
-
-        videoGrid.SuspendLayout();
-        for (int window = 0; window < videoPanels.Count; window++)
-        {
-            Forms.Control? container = videoPanels[window].Parent;
-            if (container is null || visible.Contains(window))
-                continue;
-            container.Visible = false;
-            if (videoGrid.Controls.Contains(container))
-                videoGrid.Controls.Remove(container);
-        }
-
-        videoGrid.ColumnStyles.Clear();
-        videoGrid.RowStyles.Clear();
-        videoGrid.ColumnCount = columns;
-        videoGrid.RowCount = rows;
-        for (int column = 0; column < columns; column++)
-            videoGrid.ColumnStyles.Add(
-                new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / columns));
-        for (int row = 0; row < rows; row++)
-            videoGrid.RowStyles.Add(
-                new Forms.RowStyle(Forms.SizeType.Percent, 100F / rows));
-
-        for (int position = 0; position < ordered.Length; position++)
-        {
-            Forms.Control? container = videoPanels[ordered[position]].Parent;
-            if (container is null)
-                continue;
-            container.Visible = true;
-            if (!videoGrid.Controls.Contains(container))
-                videoGrid.Controls.Add(container);
-            videoGrid.SetCellPosition(container, new Forms.TableLayoutPanelCellPosition(
-                position % columns, position / columns));
-        }
-        videoGrid.ResumeLayout(performLayout: true);
-    }
-
-    private void ArrangeProgressiveVideoGrid(
-        IReadOnlyCollection<int> visibleWindows, int requestedSlots)
-    {
-        int side = requestedSlots switch
-        {
-            <= 1 => 1,
-            <= 4 => 2,
-            <= 9 => 3,
-            _ => 4
-        };
-        int[] ordered = visibleWindows
-            .Where(window => window >= 0 && window < videoPanels.Count)
-            .Distinct()
-            .OrderBy(window => window)
-            .ToArray();
-        var visible = ordered.ToHashSet();
-
-        videoGrid.SuspendLayout();
-        for (int window = 0; window < videoPanels.Count; window++)
-        {
-            Forms.Control? container = videoPanels[window].Parent;
-            if (container is null || visible.Contains(window))
-                continue;
-            container.Visible = false;
-            if (videoGrid.Controls.Contains(container))
-                videoGrid.Controls.Remove(container);
-        }
-
-        videoGrid.ColumnStyles.Clear();
-        videoGrid.RowStyles.Clear();
-        videoGrid.ColumnCount = side;
-        videoGrid.RowCount = side;
-        for (int index = 0; index < side; index++)
-        {
-            videoGrid.ColumnStyles.Add(
-                new Forms.ColumnStyle(Forms.SizeType.Percent, 100F / side));
-            videoGrid.RowStyles.Add(
-                new Forms.RowStyle(Forms.SizeType.Percent, 100F / side));
-        }
-
-        for (int position = 0; position < ordered.Length; position++)
-        {
-            Forms.Control? container = videoPanels[ordered[position]].Parent;
-            if (container is null)
-                continue;
-            container.Visible = true;
-            if (!videoGrid.Controls.Contains(container))
-                videoGrid.Controls.Add(container);
-            videoGrid.SetCellPosition(container, new Forms.TableLayoutPanelCellPosition(
-                position % side, position / side));
-        }
-        videoGrid.ResumeLayout(performLayout: true);
-    }
-
     private int[] RegisterVideoWindows(int count)
     {
         int registered = Math.Min(count, videoPanels.Count);
@@ -865,208 +739,7 @@ public partial class MainWindow : Window
         {
             await DisconnectVideoAsync(log: false);
             ConfigureVideoGrid(slots);
-            ArrangeProgressiveVideoGrid(Array.Empty<int>(), slots);
-            VideoPlaceholder.Text = "Procurando a primeira camera disponivel...";
-            VideoPlaceholder.Visibility = Visibility.Visible;
-            deviceId = 0;
-
-            var devicesToTry = new List<(CloudApi.AccountDevice Device, int[] Channels)>();
-            if (slots == 1 && DeviceBox.SelectedItem is CloudApi.AccountDevice selected)
-            {
-                int channel = int.Parse(
-                    ((ComboBoxItem)ChannelBox.SelectedItem).Content.ToString()!);
-                devicesToTry.Add((selected, [channel]));
-            }
-            else
-            {
-                IReadOnlyDictionary<string, int> channelCounts = ReadOfficialChannelCounts();
-                var channelSummary = new List<string>();
-                foreach (CloudApi.AccountDevice device in accountDevices)
-                {
-                    int declared = channelCounts.TryGetValue(
-                        NormalizeChannelCloudId(device.CloudId), out int count)
-                        ? count
-                        : 0;
-                    string name = string.IsNullOrWhiteSpace(device.Alias)
-                        ? "Camera"
-                        : device.Alias;
-                    channelSummary.Add(
-                        $"{name} {(declared > 0 ? declared : "desconhecido")}");
-                    int channelsToOpen = declared > 0 ? declared : 1;
-                    devicesToTry.Add((device,
-                        Enumerable.Range(0, channelsToOpen).ToArray()));
-                }
-                Log("Canais declarados pelo CMS: " +
-                    string.Join("; ", channelSummary) + ".");
-            }
-
-            int[] windowResults = RegisterVideoWindows(slots);
-            Log($"Abrindo grade {slots}: {devicesToTry.Count} cameras em sequencia; " +
-                $"stream {(SubstreamBox.IsChecked == true ? "Extra" : "Main")}.");
-
-            int opened = 0;
-            int rejected = 0;
-            int nextWindow = 0;
-            foreach ((CloudApi.AccountDevice device, int[] channels) in devicesToTry)
-            {
-                if (nextWindow >= slots)
-                    break;
-
-                string name = string.IsNullOrWhiteSpace(device.Alias)
-                    ? "Camera XMEye"
-                    : device.Alias;
-                Log($"Grade: testando {name}; canais declarados {channels.Length}.");
-
-                var info = new CmsSdk.DeviceInfo();
-                int found = 0;
-                int state = 0;
-                bool allowOptimisticPreview = false;
-                Stopwatch deviceTimer = Stopwatch.StartNew();
-                while (deviceTimer.Elapsed < TimeSpan.FromSeconds(30))
-                {
-                    qtRuntime.ProcessEvents();
-                    info = new CmsSdk.DeviceInfo();
-                    found = CmsSdk.CMS_Client_GetDeviceByCloudID(
-                        device.CloudId, 2, ref info);
-                    state = info.Error;
-                    if (info.ID > 0 &&
-                        automaticDeviceLoginResults.TryGetValue(
-                            info.ID, out int callbackState))
-                        state = callbackState;
-
-                    if (found != 0 && info.ID > 0 &&
-                        (info.LoginHandle > 0 || state > 0))
-                        break;
-                    // O callback de login do CMS nem sempre e definitivo. Ja
-                    // observamos dispositivos que renderizam video mesmo apos
-                    // um estado negativo/transitorio. Se o cadastro existe,
-                    // deixa o StartPreview e o callback de quadro real (37)
-                    // decidirem se o canal deve aparecer na grade.
-                    if (found != 0 && info.ID > 0 && state < 0)
-                    {
-                        allowOptimisticPreview = true;
-                        break;
-                    }
-                    if (found != 0 && info.ID > 0 &&
-                        deviceTimer.Elapsed >= TimeSpan.FromSeconds(5))
-                    {
-                        allowOptimisticPreview = true;
-                        break;
-                    }
-                    await Task.Delay(250);
-                }
-
-                bool ready = found != 0 && info.ID > 0 &&
-                    (info.LoginHandle > 0 || state > 0 || allowOptimisticPreview);
-                if (!ready)
-                {
-                    rejected += channels.Length;
-                    Log($"Grade: {name} pulada; login nao disponivel; estado {state}; " +
-                        $"{channels.Length} canal(is) ignorado(s).");
-                    continue;
-                }
-                if (allowOptimisticPreview)
-                    Log($"Grade: {name}; cadastro localizado com estado {state}; " +
-                        "a imagem real decidira se cada canal sera exibido.");
-
-                foreach (int channel in channels)
-                {
-                    if (nextWindow >= slots)
-                        break;
-
-                    SetVideoLabel(nextWindow, device, channel);
-                    long previewStartedAt = Stopwatch.GetTimestamp();
-                    videoFrameConfirmations.TryRemove(nextWindow, out _);
-                    int previewResult = CmsSdk.CMS_Client_StartPreview(
-                        info.ID, nextWindow, channel,
-                        SubstreamBox.IsChecked == true
-                            ? CmsSdk.StreamType.Extra
-                            : CmsSdk.StreamType.Main,
-                        false);
-                    Log($"Grade: {name}; canal {channel + 1}; quadro {nextWindow + 1}; " +
-                        $"janela {windowResults[nextWindow]}; fluxo {previewResult}; estado {state}.");
-                    if (previewResult == 0)
-                    {
-                        videoLabels[nextWindow].Visible = false;
-                        rejected++;
-                        continue;
-                    }
-
-                    bool receivedFrame = false;
-                    Stopwatch frameTimer = Stopwatch.StartNew();
-                    while (frameTimer.Elapsed < TimeSpan.FromSeconds(6))
-                    {
-                        qtRuntime.ProcessEvents();
-                        if (videoFrameConfirmations.TryGetValue(
-                                nextWindow, out long confirmedAt) &&
-                            confirmedAt >= previewStartedAt)
-                        {
-                            receivedFrame = true;
-                            break;
-                        }
-                        await Task.Delay(100);
-                    }
-                    if (!receivedFrame)
-                    {
-                        try { CmsSdk.CMS_Client_StopPreviewByWnd(nextWindow, 0); }
-                        catch { }
-                        videoLabels[nextWindow].Visible = false;
-                        rejected++;
-                        Log($"Grade: {name}; canal {channel + 1}; fluxo aceito sem quadro " +
-                            "de video em 6 segundos; canal pulado.");
-                        await Task.Delay(600);
-                        videoFrameConfirmations.TryRemove(nextWindow, out _);
-                        continue;
-                    }
-
-                    activePreviewWindows.Add(nextWindow);
-                    opened++;
-                    nextWindow++;
-                    ArrangeProgressiveVideoGrid(activePreviewWindows, slots);
-                    VideoPlaceholder.Visibility = Visibility.Collapsed;
-                    await Task.Delay(350);
-                }
-            }
-
-            playing = activePreviewWindows.Count > 0;
-            DisconnectButton.IsEnabled = playing;
-            VideoPlaceholder.Text = playing
-                ? string.Empty
-                : "Nenhuma camera respondeu nesta tentativa";
-            VideoPlaceholder.Visibility = playing
-                ? Visibility.Collapsed
-                : Visibility.Visible;
-            Log($"GRADE {slots} CONCLUIDA EM SEQUENCIA: fluxos visiveis {opened}; " +
-                $"canais ignorados/recusados {rejected}.");
-        }
-        catch (Exception ex)
-        {
-            Log("ERRO AO ABRIR A GRADE: " + ex.Message);
-        }
-        finally
-        {
-            SetCameraBusy(false);
-        }
-    }
-
-    private async void GridLayoutLegacy_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not System.Windows.Controls.Button button ||
-            !int.TryParse(button.Tag?.ToString(), out int slots) ||
-            slots is not (1 or 4 or 9 or 16) || accountDevices.Count == 0)
-            return;
-
-        SetCameraBusy(true);
-        try
-        {
-            await DisconnectVideoAsync(log: false);
-            ConfigureVideoGrid(slots);
-            // Os HWNDs precisam existir para o CMS testar cada fluxo, mas os
-            // respectivos quadros nao precisam aparecer durante essa triagem.
-            // Mantem todos fora da grade visivel e publica somente os aceitos.
-            CompactVideoGrid(Array.Empty<int>());
-            VideoPlaceholder.Text = "Testando as cameras e os canais disponiveis...";
-            VideoPlaceholder.Visibility = Visibility.Visible;
+            VideoPlaceholder.Visibility = Visibility.Collapsed;
             deviceId = 0;
 
             var requests = new List<(CloudApi.AccountDevice Device, int Channel)>();
@@ -1077,31 +750,21 @@ public partial class MainWindow : Window
             }
             else
             {
-                IReadOnlyDictionary<string, int> channelCounts = ReadOfficialChannelCounts();
-                var channelSummary = new List<string>();
-                foreach (CloudApi.AccountDevice device in accountDevices)
+                if (slots == 16)
                 {
-                    int declared = channelCounts.TryGetValue(
-                        NormalizeChannelCloudId(device.CloudId), out int count)
-                        ? count
-                        : 0;
-                    string name = string.IsNullOrWhiteSpace(device.Alias)
-                        ? "Camera"
-                        : device.Alias;
-                    channelSummary.Add($"{name} {(declared > 0 ? declared : "desconhecido")}");
-
-                    // AnalogChan + DigitalChan vem do cadastro oficial do CMS.
-                    // Zero significa que o aparelho ainda nao revelou sua
-                    // capacidade; conserva apenas o canal 1 para diagnostico.
-                    int channelsToOpen = declared > 0 ? declared : 1;
-                    for (int channel = 0;
-                         channel < channelsToOpen && requests.Count < slots;
-                         channel++)
-                        requests.Add((device, channel));
-                    if (requests.Count >= slots)
-                        break;
+                    // A lista HTTP não informa de forma confiável quais modelos
+                    // possuem duas lentes. Preserva as mesmas 16 tentativas da
+                    // versao anterior, mas mostra os canais 1/2 consecutivos.
+                    for (int index = 0; index < accountDevices.Count; index++)
+                    {
+                        requests.Add((accountDevices[index], 0));
+                        if (index < 7)
+                            requests.Add((accountDevices[index], 1));
+                    }
                 }
-                Log("Canais declarados pelo CMS: " + string.Join("; ", channelSummary) + ".");
+                else
+                    requests.AddRange(accountDevices.Take(Math.Min(slots, accountDevices.Count))
+                        .Select(device => (device, 0)));
             }
             if (requests.Count > slots)
                 requests.RemoveRange(slots, requests.Count - slots);
@@ -1117,7 +780,7 @@ public partial class MainWindow : Window
             int rejected = 0;
             var completedWindows = new HashSet<int>();
             var optimisticPreviewAttempts = new HashSet<int>();
-            var emptyCredentialRetries = new Dictionary<string, int>(StringComparer.Ordinal);
+            var emptyCredentialRetries = new HashSet<string>(StringComparer.Ordinal);
             var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
@@ -1154,7 +817,7 @@ public partial class MainWindow : Window
                     // reconstruir a credencial direta de 64 caracteres; o VMS usa
                     // a identidade indireta da conta neste caminho (tamanho zero).
                     if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
-                        !emptyCredentialRetries.ContainsKey(device.CloudId))
+                        emptyCredentialRetries.Add(device.CloudId))
                     {
                         try { CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, false); }
                         catch { }
@@ -1174,29 +837,9 @@ public partial class MainWindow : Window
                         int statusResult = added > 0
                             ? XMEyeBridge.QueryDeviceStatus(device.CloudId)
                             : int.MinValue;
-                        emptyCredentialRetries[device.CloudId] = added;
                         Log($"Grade: {name}; dispositivo recusado com -7; " +
                             $"fallback sem senha e sem AdminToken: remocao {removed}; " +
                             $"novo ID {added}; consulta {statusResult}.");
-                        continue;
-                    }
-
-                    // Depois que o proprio cadastro alternativo tambem devolve
-                    // -7, nao ha outra etapa pendente: este quadro ja pode ser
-                    // descartado. -8 tambem e terminal. Assim a grade final e
-                    // revelada logo que a triagem termina, sem exibir recusados.
-                    bool fallbackWasRejected = state == -7 &&
-                        emptyCredentialRetries.TryGetValue(device.CloudId, out int fallbackId) &&
-                        fallbackId > 0 && info.ID == fallbackId;
-                    if (fallbackWasRejected || state == -8)
-                    {
-                        completedWindows.Add(window);
-                        rejected++;
-                        string name = string.IsNullOrWhiteSpace(device.Alias)
-                            ? "Camera XMEye"
-                            : device.Alias;
-                        Log($"Grade: {name}; canal {channel}; estado terminal {state}; " +
-                            "quadro ocultado antes de exibir a grade.");
                         continue;
                     }
 
@@ -1264,15 +907,8 @@ public partial class MainWindow : Window
                     $"ultimo estado {finalState}.");
             }
 
-            int hidden = requests.Count - activePreviewWindows.Count;
-            CompactVideoGrid(activePreviewWindows);
-            Log($"Grade compactada: {activePreviewWindows.Count} fluxos aceitos visiveis; " +
-                $"{hidden} recusados ocultados automaticamente.");
             playing = activePreviewWindows.Count > 0;
             DisconnectButton.IsEnabled = playing;
-            VideoPlaceholder.Text = playing
-                ? string.Empty
-                : "Nenhuma camera respondeu nesta tentativa";
             VideoPlaceholder.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
             Log($"GRADE {slots} INICIADA: fluxos aceitos {opened}; quadros ignorados/recusados {rejected}.");
         }
@@ -1529,27 +1165,8 @@ public partial class MainWindow : Window
         return queried;
     }
 
-    private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
+    private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         OpenCameraButton.IsEnabled = DeviceBox.SelectedItem is CloudApi.AccountDevice;
-        if (DeviceBox.SelectedItem is not CloudApi.AccountDevice selected)
-            return;
-
-        IReadOnlyDictionary<string, int> counts = ReadOfficialChannelCounts();
-        int declared = counts.TryGetValue(
-            NormalizeChannelCloudId(selected.CloudId), out int count)
-            ? count
-            : 0;
-        // Enquanto a capacidade for desconhecida, conserva quatro opcoes para
-        // diagnostico manual. Assim que o CMS informar a quantidade real, o
-        // seletor passa a mostrar exatamente todos os canais existentes.
-        int options = declared > 0 ? Math.Min(64, declared) : 4;
-        int previous = Math.Max(0, ChannelBox.SelectedIndex);
-        ChannelBox.Items.Clear();
-        for (int channel = 0; channel < options; channel++)
-            ChannelBox.Items.Add(new ComboBoxItem { Content = channel.ToString() });
-        ChannelBox.SelectedIndex = Math.Min(previous, options - 1);
-    }
 
     private static void EnsureCmsDataLayout(string dataDirectory)
     {
@@ -1567,18 +1184,19 @@ public partial class MainWindow : Window
         WriteCompressedTemplate(usersDatabase, compressedTemplate);
     }
 
-    private bool EnsureCmsCloudUserStore(string cloudUser)
+    private static bool EnsureCmsCloudUserStore(string cloudUser)
     {
         if (string.IsNullOrWhiteSpace(cloudUser) ||
             cloudUser.Any(character =>
                 !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
             throw new InvalidOperationException("A identidade tecnica do QR nao pode formar o banco Cloud.");
 
-        string dataDirectory = GetCmsDataDirectory();
+        string dataDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "XMEyeCloudAccountTester-CMS-v3");
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
-        cmsDevicesDatabasePath = devicesDatabase;
         bool imported = TryImportVmsDeviceDatabase(cloudUser, devicesDatabase);
         if (!imported && !File.Exists(devicesDatabase))
         {
@@ -1594,59 +1212,6 @@ public partial class MainWindow : Window
         if (File.Exists(sourceConfig) && !File.Exists(cloudConfig))
             File.Copy(sourceConfig, cloudConfig);
         return imported;
-    }
-
-    private static string GetCmsDataDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        CmsDataProfileName);
-
-    private IReadOnlyDictionary<string, int> ReadOfficialChannelCounts()
-    {
-        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (cmsDevicesDatabasePath.Length == 0 || !File.Exists(cmsDevicesDatabasePath))
-            return counts;
-
-        try
-        {
-            var builder = new SqliteConnectionStringBuilder
-            {
-                DataSource = cmsDevicesDatabasePath,
-                Mode = SqliteOpenMode.ReadOnly,
-                Cache = SqliteCacheMode.Shared,
-                DefaultTimeout = 2
-            };
-            using var connection = new SqliteConnection(builder.ToString());
-            connection.Open();
-            using SqliteCommand command = connection.CreateCommand();
-            command.CommandText =
-                "SELECT CloudID, COALESCE(AnalogChan, 0), COALESCE(DigitalChan, 0) FROM Devices";
-            using SqliteDataReader reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                if (reader.IsDBNull(0))
-                    continue;
-                string cloudId = NormalizeChannelCloudId(reader.GetString(0));
-                int analog = Math.Max(0, reader.GetInt32(1));
-                int digital = Math.Max(0, reader.GetInt32(2));
-                int total = Math.Min(64, analog + digital);
-                if (cloudId.Length > 0 && total > 0)
-                    counts[cloudId] = total;
-            }
-        }
-        catch (Exception ex)
-        {
-            Log("AVISO: nao foi possivel ler a quantidade oficial de canais: " + ex.Message);
-        }
-        return counts;
-    }
-
-    private static string NormalizeChannelCloudId(string cloudId)
-    {
-        string normalized = cloudId.Trim();
-        const string suffix = "_Cloud";
-        return normalized.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-            ? normalized[..^suffix.Length]
-            : normalized;
     }
 
     private static bool TryImportVmsDeviceDatabase(string cloudUser, string destination)
@@ -1752,7 +1317,6 @@ public partial class MainWindow : Window
             catch { }
         }
         activePreviewWindows.Clear();
-        videoFrameConfirmations.Clear();
         playing = false;
         // O VMS encerra somente o preview e preserva o login automatico do
         // dispositivo para que outra camera possa ser aberta imediatamente.
@@ -1926,12 +1490,6 @@ public partial class MainWindow : Window
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
-        // O evento 7 informa apenas a resolucao anunciada e tambem aparece em
-        // streams pretos (como o Portao). O evento 37 so chegou, nesta build,
-        // depois que o renderizador recebeu imagem de fato; p4 e a janela.
-        if (type == CmsSdk.MessageType.VideoWindowControl &&
-            p1 == 37 && p4 >= 0)
-            videoFrameConfirmations[p4] = Stopwatch.GetTimestamp();
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() =>
@@ -1956,7 +1514,6 @@ public partial class MainWindow : Window
                 catch { }
             }
             activePreviewWindows.Clear();
-            videoFrameConfirmations.Clear();
             ClearAccountDevices();
             AccountPasswordBox.Clear();
             CaptchaBox.Clear();
