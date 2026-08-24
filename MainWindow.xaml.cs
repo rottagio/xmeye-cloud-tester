@@ -233,7 +233,7 @@ public partial class MainWindow : Window
                     TimeSpan.FromSeconds(8), cancellationToken);
                 try
                 {
-                    cloudGroupId = EnsureCloudGroup();
+                    cloudGroupId = await EnsureCloudGroupAsync(cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -631,21 +631,26 @@ public partial class MainWindow : Window
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         OpenCameraButton.IsEnabled = DeviceBox.SelectedItem is CloudApi.AccountDevice;
 
-    private static int EnsureCloudGroup()
+    private static async Task<int> EnsureCloudGroupAsync(CancellationToken cancellationToken)
     {
         const string groupName = "XMEye Cloud";
         var info = new CmsSdk.GroupInfo();
-        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID >= 0)
+        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID > 0)
             return info.ID;
 
         int added = CmsSdk.CMS_Client_AddGroup(groupName);
-        // AddGroup devolve diretamente o ID; zero e o primeiro grupo valido.
-        if (added >= 0)
-            return added;
+        if (added < 0)
+            throw new InvalidOperationException($"Nao foi possivel criar o grupo local Cloud ({added}).");
 
-        info = new CmsSdk.GroupInfo();
-        if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID >= 0)
-            return info.ID;
+        // AddGroup confirma a operacao com zero; o ID e gravado de forma
+        // assincrona pelo event loop do CMS e precisa ser consultado depois.
+        for (int attempt = 0; attempt < 30; attempt++)
+        {
+            await Task.Delay(100, cancellationToken);
+            info = new CmsSdk.GroupInfo();
+            if (CmsSdk.CMS_Client_GetGroupInfoByName(groupName, ref info) == 1 && info.ID > 0)
+                return info.ID;
+        }
         throw new InvalidOperationException($"Nao foi possivel preparar o grupo local Cloud ({added}).");
     }
 
