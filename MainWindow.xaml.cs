@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private readonly List<Forms.Panel> videoPanels = [];
     private readonly List<Forms.Label> videoLabels = [];
     private readonly HashSet<int> activePreviewWindows = [];
+    private readonly ConcurrentDictionary<int, long> videoFrameConfirmations = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
@@ -955,6 +956,8 @@ public partial class MainWindow : Window
                         break;
 
                     SetVideoLabel(nextWindow, device, channel);
+                    long previewStartedAt = Stopwatch.GetTimestamp();
+                    videoFrameConfirmations.TryRemove(nextWindow, out _);
                     int previewResult = CmsSdk.CMS_Client_StartPreview(
                         info.ID, nextWindow, channel,
                         SubstreamBox.IsChecked == true
@@ -967,6 +970,33 @@ public partial class MainWindow : Window
                     {
                         videoLabels[nextWindow].Visible = false;
                         rejected++;
+                        continue;
+                    }
+
+                    bool receivedFrame = false;
+                    Stopwatch frameTimer = Stopwatch.StartNew();
+                    while (frameTimer.Elapsed < TimeSpan.FromSeconds(6))
+                    {
+                        qtRuntime.ProcessEvents();
+                        if (videoFrameConfirmations.TryGetValue(
+                                nextWindow, out long confirmedAt) &&
+                            confirmedAt >= previewStartedAt)
+                        {
+                            receivedFrame = true;
+                            break;
+                        }
+                        await Task.Delay(100);
+                    }
+                    if (!receivedFrame)
+                    {
+                        try { CmsSdk.CMS_Client_StopPreviewByWnd(nextWindow, 0); }
+                        catch { }
+                        videoLabels[nextWindow].Visible = false;
+                        rejected++;
+                        Log($"Grade: {name}; canal {channel + 1}; fluxo aceito sem quadro " +
+                            "de video em 6 segundos; canal pulado.");
+                        await Task.Delay(600);
+                        videoFrameConfirmations.TryRemove(nextWindow, out _);
                         continue;
                     }
 
@@ -1701,6 +1731,7 @@ public partial class MainWindow : Window
             catch { }
         }
         activePreviewWindows.Clear();
+        videoFrameConfirmations.Clear();
         playing = false;
         // O VMS encerra somente o preview e preserva o login automatico do
         // dispositivo para que outra camera possa ser aberta imediatamente.
@@ -1874,6 +1905,9 @@ public partial class MainWindow : Window
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
+        if (type == CmsSdk.MessageType.VideoWindowControl &&
+            p1 == 7 && p2 >= 0 && p3 > 0 && p4 > 0)
+            videoFrameConfirmations[p2] = Stopwatch.GetTimestamp();
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() =>
@@ -1898,6 +1932,7 @@ public partial class MainWindow : Window
                 catch { }
             }
             activePreviewWindows.Clear();
+            videoFrameConfirmations.Clear();
             ClearAccountDevices();
             AccountPasswordBox.Clear();
             CaptchaBox.Clear();
