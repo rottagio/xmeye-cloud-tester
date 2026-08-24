@@ -517,13 +517,11 @@ public partial class MainWindow : Window
         int found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
 
         string name = string.IsNullOrWhiteSpace(selected.Alias) ? "Câmera XMEye" : selected.Alias;
-        string registrationId = selected.CloudId + "_000000000000";
-
         if (found == 0 || info.ID <= 0)
         {
             int added = CmsSdk.CMS_Client_AddDeviceByID(
-                registrationId, selected.DeviceUser, selected.DevicePassword,
-                selected.AdminToken, 0, name, cloudGroupId, selected.IsShared);
+                selected.CloudId, selected.DeviceUser, selected.DevicePassword,
+                0, name, cloudGroupId, 2);
             Log($"Cadastro ausente na sincronização; recriado: {added}.");
             if (added < 0)
                 return (false, added, info);
@@ -602,14 +600,13 @@ public partial class MainWindow : Window
 
             string name = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera XMEye" : device.Alias;
             int added = CmsSdk.CMS_Client_AddDeviceByID(
-                device.CloudId + "_000000000000",
+                device.CloudId,
                 device.DeviceUser,
                 device.DevicePassword,
-                device.AdminToken,
                 0,
                 name,
                 cloudGroupId,
-                device.IsShared);
+                2);
             if (added > 0)
                 synchronized++;
             else

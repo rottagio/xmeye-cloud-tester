@@ -82,8 +82,8 @@ internal static class CmsSdk
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_AddDeviceByID(
-        string cloudId, string user, string password, string adminToken, int vendor,
-        string name, int groupId, [MarshalAs(UnmanagedType.I1)] bool shared);
+        string cloudId, string user, string password, int vendor,
+        string name, int groupId, int loginType);
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_GetDeviceByCloudID(string cloudId, int loginType, ref DeviceInfo info);
