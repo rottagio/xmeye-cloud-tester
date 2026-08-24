@@ -784,7 +784,7 @@ public partial class MainWindow : Window
             var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
-                   loginTimer.Elapsed < TimeSpan.FromSeconds(30))
+                   loginTimer.Elapsed < TimeSpan.FromSeconds(60))
             {
                 qtRuntime.ProcessEvents();
                 for (int window = 0; window < requests.Count && window < videoPanels.Count; window++)
@@ -808,38 +808,18 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    // O VMS Pro consegue um login tradicional adicional usando a
-                    // identidade indireta da conta (senha entregue ao NetSDK com
-                    // tamanho zero). A copia importada pode fazer esta build do CMS
-                    // enviar a credencial armazenada diretamente e receber -7.
-                    // Recria somente os dispositivos recusados, uma unica vez, com
-                    // senha e AdminToken vazios. Preservar o AdminToken fazia o SDK
-                    // reconstruir a credencial direta de 64 caracteres; o VMS usa
-                    // a identidade indireta da conta neste caminho (tamanho zero).
+                    // Nunca remove nem recria um cadastro recusado. O CMS grava
+                    // essas alteracoes no devices.db usado pelo VMS; repeticoes do
+                    // fallback destruíam justamente o cadastro/token que podia
+                    // autenticar em uma tentativa posterior.
                     if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
                         emptyCredentialRetries.Add(device.CloudId))
                     {
-                        try { CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, false); }
-                        catch { }
-                        int removed = CmsSdk.CMS_Client_RemoveDevice(info.ID);
                         string name = string.IsNullOrWhiteSpace(device.Alias)
                             ? "Camera XMEye"
                             : device.Alias;
-                        int added = CmsSdk.CMS_Client_AddDeviceByID(
-                            FormatCmsRegistrationId(device.CloudId),
-                            device.DeviceUser,
-                            string.Empty,
-                            string.Empty,
-                            0,
-                            name,
-                            cloudGroupId,
-                            device.IsShared);
-                        int statusResult = added > 0
-                            ? XMEyeBridge.QueryDeviceStatus(device.CloudId)
-                            : int.MinValue;
-                        Log($"Grade: {name}; dispositivo recusado com -7; " +
-                            $"fallback sem senha e sem AdminToken: remocao {removed}; " +
-                            $"novo ID {added}; consulta {statusResult}.");
+                        Log($"Grade: {name}; dispositivo {info.ID} recusado com -7; " +
+                            "cadastro preservado; aguardando nova resposta do CMS.");
                         continue;
                     }
 
@@ -903,7 +883,7 @@ public partial class MainWindow : Window
                 completedWindows.Add(window);
                 rejected++;
                 int finalState = lastLoginStates.TryGetValue(window, out int state) ? state : 0;
-                Log($"Grade: quadro {window + 1}; login nao concluido apos 30 segundos; " +
+                Log($"Grade: quadro {window + 1}; login nao concluido apos 60 segundos; " +
                     $"ultimo estado {finalState}.");
             }
 
@@ -1191,9 +1171,7 @@ public partial class MainWindow : Window
                 !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
             throw new InvalidOperationException("A identidade tecnica do QR nao pode formar o banco Cloud.");
 
-        string dataDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "XMEyeCloudAccountTester-CMS-v3");
+        string dataDirectory = AppContext.BaseDirectory;
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
