@@ -780,6 +780,7 @@ public partial class MainWindow : Window
             int rejected = 0;
             var completedWindows = new HashSet<int>();
             var optimisticPreviewAttempts = new HashSet<int>();
+            var emptyCredentialRetries = new HashSet<string>(StringComparer.Ordinal);
             var lastLoginStates = new Dictionary<int, int>();
             Stopwatch loginTimer = Stopwatch.StartNew();
             while (completedWindows.Count < requests.Count &&
@@ -804,6 +805,38 @@ public partial class MainWindow : Window
                         completedWindows.Add(window);
                         rejected++;
                         Log($"Grade: quadro {window + 1}; cadastro nao localizado; canal {channel}.");
+                        continue;
+                    }
+
+                    // O VMS Pro consegue um login tradicional adicional usando a
+                    // identidade indireta da conta (senha entregue ao NetSDK com
+                    // tamanho zero). A copia importada pode fazer esta build do CMS
+                    // enviar a credencial armazenada diretamente e receber -7.
+                    // Recria somente os dispositivos recusados, uma unica vez, com
+                    // senha vazia e preservando o token Cloud da conta.
+                    if (state == -7 && loginTimer.Elapsed >= TimeSpan.FromSeconds(5) &&
+                        emptyCredentialRetries.Add(device.CloudId))
+                    {
+                        try { CmsSdk.CMS_Client_DeviceLoginOrLogout(info.ID, false); }
+                        catch { }
+                        int removed = CmsSdk.CMS_Client_RemoveDevice(info.ID);
+                        string name = string.IsNullOrWhiteSpace(device.Alias)
+                            ? "Camera XMEye"
+                            : device.Alias;
+                        int added = CmsSdk.CMS_Client_AddDeviceByID(
+                            FormatCmsRegistrationId(device.CloudId),
+                            device.DeviceUser,
+                            string.Empty,
+                            device.AdminToken,
+                            0,
+                            name,
+                            cloudGroupId,
+                            device.IsShared);
+                        int statusResult = added > 0
+                            ? XMEyeBridge.QueryDeviceStatus(device.CloudId)
+                            : int.MinValue;
+                        Log($"Grade: dispositivo recusado com -7; fallback de credencial indireta: " +
+                            $"remocao {removed}; novo ID {added}; consulta {statusResult}.");
                         continue;
                     }
 
