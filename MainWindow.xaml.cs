@@ -521,7 +521,7 @@ public partial class MainWindow : Window
         {
             int added = CmsSdk.CMS_Client_AddDeviceByID(
                 selected.CloudId, selected.DeviceUser, selected.DevicePassword,
-                0, name, cloudGroupId, 2);
+                selected.AdminToken, 0, name, cloudGroupId, selected.IsShared);
             Log($"Cadastro ausente na sincronização; recriado: {added}.");
             if (added < 0)
                 return (false, added, info);
@@ -603,10 +603,11 @@ public partial class MainWindow : Window
                 device.CloudId,
                 device.DeviceUser,
                 device.DevicePassword,
+                device.AdminToken,
                 0,
                 name,
                 cloudGroupId,
-                2);
+                device.IsShared);
             if (added > 0)
                 synchronized++;
             else
