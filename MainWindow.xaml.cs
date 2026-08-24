@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -24,6 +25,7 @@ public partial class MainWindow : Window
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
+    private readonly ConcurrentDictionary<int, int> automaticDeviceLoginResults = new();
     private readonly object diagnosticLock = new();
     private readonly string diagnosticPath;
     private readonly string diagnosticSession = Guid.NewGuid().ToString("N")[..8];
@@ -101,13 +103,12 @@ public partial class MainWindow : Window
             sdkReady = cmsResult == 0;
             if (!sdkReady)
                 throw new InvalidOperationException($"CMS_Client_Init retornou {cmsResult}.");
-            int autoStatus = CmsSdk.CMS_Client_SetAutoCheckDevStatus(true);
             QrCloudApi.ConfigureBrazilRegion();
 
             Log("Motor de video inicializado; banco local do CMS sera concluido apos o login QR.");
 
             Log("Regiao Cloud: Brasil (SA).");
-            Log($"Verificacao automatica de estado: {autoStatus}.");
+            Log("Verificacao automatica de estado: padrao interno do CMS (igual ao VMS Pro).");
             Log("Motor pronto. Carregando o login oficial por QR da conta XMEye/iCSee...");
         }
         catch (DllNotFoundException ex)
@@ -242,18 +243,13 @@ public partial class MainWindow : Window
                 // No devices.db do VMS oficial, Cloud Group e virtual: a
                 // tabela Groups fica vazia e todos os dispositivos usam 65535.
                 cloudGroupId = ushort.MaxValue;
-                int bindCloudResult = await Task.Run(
-                    () => CmsSdk.CMS_Client_SetBindCloudState(true),
-                    cancellationToken);
+                ClearAccountDevices();
                 IReadOnlyList<CloudApi.AccountDevice> devices =
                     await Task.Run(
                         () => QrCloudApi.GetDevices(
                             status.AccessToken, status.LocalUser, status.LocalPassword),
                         cancellationToken);
                 (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
-                int queriedStates = await Task.Run(
-                    () => QueryAllAccountDeviceStates(devices), cancellationToken);
-                await Task.Delay(1200, cancellationToken);
                 Log($"Sessao local vinculada ao QR: {linkedSession}.");
                 Log("Identidade interna da conta aplicada ao CMS.");
                 Log(importedVmsCredentials
@@ -261,8 +257,7 @@ public partial class MainWindow : Window
                     : "Banco do VMS Pro nao localizado; usando somente os dados da nuvem.");
                 Log($"Canal oficial MQTT da conta inicializado: {mqttResult}.");
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
-                Log($"Estado de vinculo Cloud ativado: {bindCloudResult}.");
-                ClearAccountDevices();
+                Log("Varredura automatica das credenciais iniciada pelo CMS.");
                 cloudAccessToken = status.AccessToken;
                 accountDevices.AddRange(devices);
                 DeviceBox.ItemsSource = accountDevices;
@@ -283,7 +278,7 @@ public partial class MainWindow : Window
                     Log($"Credencial individual da lista: senha direta {parse.DirectPasswordPresent}/{accountDevices.Count}; tamanho oficial 16 em {parse.PasswordLength16}/{accountDevices.Count}.");
                     Log($"Credencial técnica do QR aplicada: usuário {parse.SessionUserFallback}; senha {parse.SessionPasswordFallback}.");
                     Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
-                    Log($"Estados Cloud consultados em conjunto: {queriedStates}/{accountDevices.Count}.");
+                    Log("As cameras serao abertas somente apos o callback final do login automatico.");
                 }
                 else
                 {
@@ -508,7 +503,7 @@ public partial class MainWindow : Window
             int previewResult = CmsSdk.CMS_Client_StartPreview(
                 deviceId, 0, channel,
                 SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
-                true);
+                false);
             Log($"Janela de vídeo: {windowResult}; abertura do fluxo: {previewResult}.");
             if (previewResult == 0)
             {
@@ -592,17 +587,55 @@ public partial class MainWindow : Window
 
         Log("Cadastro Cloud preservado como foi criado pela sincronização oficial da conta.");
 
-        int statusQuery = XMEyeBridge.QueryDeviceStatus(selected.CloudId);
-        await Task.Delay(3000);
-        CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
-        Log($"Preflight oficial de transporte: retorno {statusQuery}.");
-        Log("Rota de transporte entregue ao NetSDK; o resultado real sera confirmado pelo login.");
+        Log("Aguardando o login automatico do CMS, como no VMS Pro...");
+        (bool loginReady, int loginError) = await WaitForAutomaticDeviceLoginAsync(
+            selected.CloudId, info.ID, TimeSpan.FromSeconds(30));
+        if (!loginReady)
+            return (false, loginError, info);
 
-        // O VMS funcional nao chama DeviceLoginOrLogout antes da visualizacao.
-        // StartPreview com openDevice=true inicia internamente o login Cloud e
-        // evita a recusa -7 produzida pela chamada manual antecipada.
-        Log("Dispositivo preparado; o login sera iniciado diretamente pela visualizacao.");
+        found = CmsSdk.CMS_Client_GetDeviceByCloudID(selected.CloudId, 2, ref info);
+        Log($"Login automatico confirmado: consulta {found}; ID {info.ID}; " +
+            $"loginHandle {(info.LoginHandle > 0 ? "positivo" : "nao exposto")}; erro {info.Error}.");
+        Log("Dispositivo preparado; a visualizacao reutilizara a sessao autenticada pelo CMS.");
         return (true, 0, info);
+    }
+
+    private async Task<(bool Ok, int Error)> WaitForAutomaticDeviceLoginAsync(
+        string cloudId, int selectedDeviceId, TimeSpan timeout)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+        int lastStatusQuery = int.MinValue;
+        while (timer.Elapsed < timeout)
+        {
+            qtRuntime.ProcessEvents();
+            var info = new CmsSdk.DeviceInfo();
+            int found = CmsSdk.CMS_Client_GetDeviceByCloudID(cloudId, 2, ref info);
+            if (found != 0 && info.LoginHandle > 0)
+                return (true, 0);
+
+            if (automaticDeviceLoginResults.TryGetValue(selectedDeviceId, out int result))
+            {
+                if (result > 0)
+                    return (true, 0);
+                if (result < 0)
+                {
+                    Log($"Login automatico recusado pelo CMS: dispositivo {selectedDeviceId}; retorno {result}.");
+                    return (false, result);
+                }
+            }
+
+            // O VMS inicia a verificacao alguns segundos apos carregar o banco.
+            // Esta consulta desperta o mesmo ciclo se ele ainda nao comecou.
+            if (lastStatusQuery == int.MinValue && timer.Elapsed >= TimeSpan.FromSeconds(3))
+            {
+                lastStatusQuery = XMEyeBridge.QueryDeviceStatus(cloudId);
+                Log($"Ciclo automatico de estado solicitado: retorno {lastStatusQuery}.");
+            }
+            await Task.Delay(100);
+        }
+
+        Log("Login automatico do CMS esgotou 30 segundos sem callback final.");
+        return (false, -3);
     }
 
     private (int Synchronized, int Failed) SynchronizeAccountDevicesToCms(
@@ -804,6 +837,7 @@ public partial class MainWindow : Window
         DeviceBox.IsEnabled = false;
         OpenCameraButton.IsEnabled = false;
         accountDevices.Clear();
+        automaticDeviceLoginResults.Clear();
     }
 
     private void DisconnectVideo(bool log)
@@ -813,11 +847,9 @@ public partial class MainWindow : Window
             CmsSdk.CMS_Client_StopPreviewByWnd(0, 0);
             playing = false;
         }
-        if (deviceId != 0)
-        {
-            CmsSdk.CMS_Client_DeviceLoginOrLogout(deviceId, false);
-            deviceId = 0;
-        }
+        // O VMS encerra somente o preview e preserva o login automatico do
+        // dispositivo para que outra camera possa ser aberta imediatamente.
+        deviceId = 0;
         VideoPlaceholder.Visibility = Visibility.Visible;
         DisconnectButton.IsEnabled = false;
         if (log) Log("Vídeo desconectado.");
@@ -958,9 +990,12 @@ public partial class MainWindow : Window
         CmsSdk.MessageType type, int p1, int p2, int p3, int p4,
         IntPtr text1, IntPtr text2, uint size, IntPtr user)
     {
-        if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 &&
-            p2 == deviceId && p4 < 0)
-            previewLoginError = p4;
+        if (type == CmsSdk.MessageType.DeviceControl && p1 == 3)
+        {
+            automaticDeviceLoginResults[p2] = p4;
+            if (p2 == deviceId && p4 < 0)
+                previewLoginError = p4;
+        }
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         Dispatcher.BeginInvoke((Action)(() => Log($"SDK {type}: {p1}, {p2}, {p3}, {p4}.")));
@@ -979,7 +1014,6 @@ public partial class MainWindow : Window
             captchaToken = string.Empty;
             if (sdkReady)
             {
-                CmsSdk.CMS_Client_SetBindCloudState(false);
                 CmsSdk.CMS_Client_UnInit();
             }
             qtRuntime.Dispose();
