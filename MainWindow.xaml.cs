@@ -347,6 +347,23 @@ public partial class MainWindow : Window
         public event PropertyChangedEventHandler? PropertyChanged;
     }
 
+    private sealed class DeviceCompatibilityRow
+    {
+        public required string Camera { get; init; }
+        public required string Identifier { get; init; }
+        public required string Model { get; init; }
+        public required string Firmware { get; init; }
+        public required string InternalCode { get; init; }
+        public required string Platform { get; init; }
+        public required string Channels { get; init; }
+        public required string Ptz { get; init; }
+        public required string HumanDetection { get; init; }
+        public required string DoubleLight { get; init; }
+        public required string AlarmSound { get; init; }
+        public required string CloudUpgrade { get; init; }
+        public required string Updated { get; init; }
+    }
+
     public MainWindow()
     {
         string diagnosticDirectory = Path.Combine(
@@ -4643,6 +4660,144 @@ public partial class MainWindow : Window
         CameraSaveStatusText.Text = previewBindings.Count > 0
             ? "Teste iniciado. Consulte o estado no monitor Ao vivo."
             : "A câmera não iniciou o teste de vídeo.";
+    }
+
+    private void ShowCompatibilityTable_Click(object sender, RoutedEventArgs e)
+    {
+        RefreshDeviceProfilesFromKnownData();
+        DeviceCompatibilityRow[] rows = accountDevices.Select(BuildCompatibilityRow).ToArray();
+        var table = new DataGrid
+        {
+            ItemsSource = rows,
+            IsReadOnly = true,
+            AutoGenerateColumns = false,
+            CanUserAddRows = false,
+            CanUserDeleteRows = false,
+            CanUserReorderColumns = true,
+            CanUserResizeColumns = true,
+            CanUserSortColumns = true,
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+            GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(7, 17, 30)),
+            Foreground = System.Windows.Media.Brushes.White,
+            BorderBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(38, 58, 80)),
+            RowBackground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(10, 21, 35)),
+            AlternatingRowBackground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(13, 28, 45)),
+            HorizontalGridLinesBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(38, 58, 80)),
+            VerticalGridLinesBrush = System.Windows.Media.Brushes.Transparent,
+            SelectionMode = DataGridSelectionMode.Single,
+            SelectionUnit = DataGridSelectionUnit.FullRow
+        };
+        static void AddColumn(DataGrid grid, string header, string property, double width)
+        {
+            grid.Columns.Add(new DataGridTextColumn
+            {
+                Header = header,
+                Binding = new System.Windows.Data.Binding(property),
+                Width = new DataGridLength(width)
+            });
+        }
+        AddColumn(table, "Câmera", nameof(DeviceCompatibilityRow.Camera), 130);
+        AddColumn(table, "Identificador", nameof(DeviceCompatibilityRow.Identifier), 125);
+        AddColumn(table, "Modelo informado", nameof(DeviceCompatibilityRow.Model), 145);
+        AddColumn(table, "Firmware", nameof(DeviceCompatibilityRow.Firmware), 220);
+        AddColumn(table, "Código interno", nameof(DeviceCompatibilityRow.InternalCode), 105);
+        AddColumn(table, "Plataforma", nameof(DeviceCompatibilityRow.Platform), 170);
+        AddColumn(table, "Canais", nameof(DeviceCompatibilityRow.Channels), 85);
+        AddColumn(table, "PTZ", nameof(DeviceCompatibilityRow.Ptz), 95);
+        AddColumn(table, "Pessoa", nameof(DeviceCompatibilityRow.HumanDetection), 95);
+        AddColumn(table, "Luz dupla", nameof(DeviceCompatibilityRow.DoubleLight), 95);
+        AddColumn(table, "Alarme sonoro", nameof(DeviceCompatibilityRow.AlarmSound), 115);
+        AddColumn(table, "Upgrade cloud", nameof(DeviceCompatibilityRow.CloudUpgrade), 110);
+        AddColumn(table, "Atualizado", nameof(DeviceCompatibilityRow.Updated), 125);
+
+        var content = new Grid { Margin = new Thickness(20) };
+        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var heading = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
+        heading.Children.Add(new TextBlock
+        {
+            Text = "Identificação e compatibilidade",
+            Foreground = System.Windows.Media.Brushes.White,
+            FontSize = 22,
+            FontWeight = FontWeights.SemiBold
+        });
+        heading.Children.Add(new TextBlock
+        {
+            Text = "Tabela local construída com dados já recebidos. '?' significa que o recurso ainda não foi identificado; nenhuma consulta é enviada ao abrir esta tela.",
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 5, 0, 0)
+        });
+        content.Children.Add(heading);
+        Grid.SetRow(table, 1);
+        content.Children.Add(table);
+
+        var dialog = new Window
+        {
+            Owner = this,
+            Title = "Compatibilidade das câmeras",
+            Width = 1380,
+            Height = 650,
+            MinWidth = 900,
+            MinHeight = 420,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(8, 20, 33)),
+            Content = content
+        };
+        dialog.ShowDialog();
+    }
+
+    private DeviceCompatibilityRow BuildCompatibilityRow(CloudApi.AccountDevice device)
+    {
+        deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        string Capability(string key) =>
+            profile is not null && profile.Capabilities.TryGetValue(
+                key, out DeviceProfileStore.CapabilityEvidence? evidence)
+                ? evidence.Supported ? "Sim" : "Não"
+                : "?";
+        string AnyCapability(params string[] keys)
+        {
+            if (profile is null)
+                return "?";
+            DeviceProfileStore.CapabilityEvidence[] evidence = keys
+                .Where(profile.Capabilities.ContainsKey)
+                .Select(key => profile.Capabilities[key])
+                .ToArray();
+            return evidence.Length == 0 ? "?" : evidence.Any(item => item.Supported) ? "Sim" : "Não";
+        }
+        int? channels = profile?.ConfirmedChannelCount ??
+            (entry.ChannelCountOverride is 1 or 2 ? entry.ChannelCountOverride : entry.DetectedChannelCount);
+        return new DeviceCompatibilityRow
+        {
+            Camera = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera" : device.Alias,
+            Identifier = device.MaskedCloudId,
+            Model = profile?.ReportedModel.Length > 0 ? profile.ReportedModel : "Não informado",
+            Firmware = profile?.Firmware.Length > 0 ? profile.Firmware : "Não informado",
+            InternalCode = profile?.FirmwareProductCode.Length > 0 ? profile.FirmwareProductCode : "?",
+            Platform = profile?.ChipSolutionCode.Length > 0
+                ? profile.ChipFamily.Length > 0
+                    ? $"{profile.ChipFamily} ({profile.ChipSolutionCode})"
+                    : $"Código {profile.ChipSolutionCode}"
+                : "?",
+            Channels = channels?.ToString() ?? "?",
+            Ptz = AnyCapability("SupportPTZDirectionControl", "PTZ.Direction"),
+            HumanDetection = Capability("SupportHumanDetection"),
+            DoubleLight = Capability("SupportDoubleLightCamera"),
+            AlarmSound = AnyCapability("SupportDVRAlarmSound", "SupportIPCAlarmSound"),
+            CloudUpgrade = Capability("SupportCloudUpgradeConfig"),
+            Updated = profile is not null && profile.UpdatedAtUtc != default
+                ? profile.UpdatedAtUtc.ToLocalTime().ToString("dd/MM HH:mm")
+                : "—"
+        };
     }
 
     private async void RemoveSelectedCamera_Click(object sender, RoutedEventArgs e)
