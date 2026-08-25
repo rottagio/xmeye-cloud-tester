@@ -37,6 +37,8 @@ jobs:
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll .\release-patch\
           Copy-Item .\XMEyeBridge.dll .\release-patch\
           Copy-Item .\CloudServer .\release-patch\
+          Copy-Item .\COMO_TESTAR.txt .\release-patch\
+          Copy-Item .\LEIA-ME.md .\release-patch\
           # Compatibilidade de uma unica versao com o instalador antigo, que
           # removia o primeiro caractere de cada caminho ao copiar os arquivos.
           Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.dll '.\release-patch\!XMEyeCloudTester.dll'
