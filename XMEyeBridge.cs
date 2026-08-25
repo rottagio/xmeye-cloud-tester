@@ -65,6 +65,10 @@ internal static class XMEyeBridge
     private static extern int XMEye_QueryDeviceStatus(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string cloudId);
 
+    [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int XMEye_ConfigureRecording(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destination);
+
     internal static void EnableQtDiagnostics(string path)
     {
         int result = XMEye_EnableQtDiagnostics(path);
@@ -124,6 +128,12 @@ internal static class XMEyeBridge
     {
         lock (Sync)
             return XMEye_QueryDeviceStatus(cloudId);
+    }
+
+    internal static int ConfigureRecording(string destination)
+    {
+        lock (Sync)
+            return XMEye_ConfigureRecording(destination);
     }
 
     internal static string Get(string url, int requestType)

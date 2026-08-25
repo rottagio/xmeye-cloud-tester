@@ -19,11 +19,27 @@ internal static class CloudApi
     internal sealed class AccountDevice
     {
         internal required string CloudId { get; init; }
-        internal required string Alias { get; init; }
-        internal required string DeviceUser { get; init; }
-        internal required string DevicePassword { get; init; }
+        public required string Alias { get; set; }
+        internal required string DeviceUser { get; set; }
+        internal required string DevicePassword { get; set; }
         internal string AdminToken { get; init; } = string.Empty;
         internal bool IsShared { get; init; }
+        public string LocalGroup { get; set; } = "Casa";
+        public bool ShowInLiveView { get; set; } = true;
+        public string Model { get; init; } = string.Empty;
+        public string Firmware { get; init; } = string.Empty;
+        public string ProductId { get; init; } = string.Empty;
+        public bool IsNetworkDevice { get; init; }
+        public int NetworkPort { get; init; } = 34567;
+        internal int CmsDeviceId { get; set; }
+        public string RuntimeStatus { get; set; } = "Aguardando";
+
+        public string OrganizationSummary =>
+            $"{LocalGroup}  •  {RuntimeStatus}  •  {(ShowInLiveView ? "Visível no monitor" : "Oculta no monitor")}";
+
+        public string MaskedCloudId => IsNetworkDevice ? $"Rede local: {CloudId}:{NetworkPort}" : CloudId.Length <= 8
+            ? "••••"
+            : $"{CloudId[..4]}••••{CloudId[^4..]}";
 
         public override string ToString() => string.IsNullOrWhiteSpace(Alias) ? CloudId : Alias;
     }

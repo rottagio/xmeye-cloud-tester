@@ -15,3 +15,7 @@ official-runtime/
 *.dll
 *.exe
 *.pdb
+*.obj
+*.lib
+*.exp
+tools/

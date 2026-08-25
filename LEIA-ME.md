@@ -1,14 +1,11 @@
-# XMEye Cloud Tester — login por QR
+# iCSee/XMEye Monitor
 
-Aplicativo portátil Windows x64 para vincular uma conta XMEye/iCSee, obter as
-câmeras associadas e abrir o vídeo remotamente pelo ecossistema cloud Xiongmai.
+Abra `XMEyeCloudTester.exe` sem retirar arquivos da pasta. No primeiro acesso,
+vincule a conta pelo QR exibido ou use o login oficial na tela **Câmeras**.
 
-## Fluxo
+O aplicativo restaura a sessão protegida no próximo uso, monta a última grade e
+reconecta fluxos interrompidos. Use **Câmeras** para cadastro e organização,
+**Gravações** para fotos e vídeos locais e **Configurações** para pastas,
+qualidade, tema, idioma, armazenamento e diagnóstico.
 
-`QR oficial → conta cloud → lista de dispositivos → Cloud ID → CMS/CloudSN → vídeo`
-
-O QR segue o fluxo atual do VMS Pro e usa chamadas HTTPS assinadas pelo
-`CMSClient.dll`. Não é necessário digitar e-mail, senha ou CAPTCHA no Windows.
-Tokens e credenciais internas não são persistidos pelo aplicativo.
-
-Consulte `COMO_TESTAR.txt` antes do primeiro uso.
+Senhas não aparecem em logs. Senhas de dispositivos manuais não são salvas.

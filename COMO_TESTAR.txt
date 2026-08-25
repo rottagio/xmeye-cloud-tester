@@ -1,20 +1,17 @@
-XMEYE CLOUD TESTER — LOGIN POR QR
+ICSEE/XMEYE MONITOR — TESTE RÁPIDO
 
-1. Abra XMEyeCloudTester.exe.
-2. Aguarde o QR oficial aparecer.
-3. No celular, abra o XMEye ou iCSee e use a opção de escanear QR.
-4. Confirme o vínculo no celular.
-5. Escolha uma câmera na lista retornada pela conta.
-6. Mantenha “Usar fluxo leve (SD)” marcado no primeiro teste.
-7. Clique em ABRIR CÂMERA SELECIONADA.
+1. Abra XMEyeCloudTester.exe dentro da pasta completa.
+2. No primeiro uso, leia o QR com XMEye/iCSee e confirme no celular.
+3. Aguarde a lista de câmeras e a grade serem montadas em sequência.
+4. Confirme os estados Online, Offline ou Reconectando no título de cada quadro.
+5. Selecione um quadro para testar áudio, captura, gravação, fala, PTZ/zoom,
+   qualidade SD/HD, espelhamento ou janela separada.
+6. Abra Gravações para conferir miniaturas, reprodução e exclusão pela Lixeira.
+7. Abra Câmeras para alterar nome, ambiente, ordem, visibilidade e qualidade.
+8. Abra Configurações para ajustar reconexão, pastas e armazenamento.
 
-Não digite e-mail ou senha no aplicativo para Windows. Se o QR expirar, clique em
-GERAR NOVO QR. O fluxo usa os endpoints HTTPS assinados do VMS Pro oficial.
+O aplicativo restaura a sessão e o último layout automaticamente. Use Sair da
+conta para remover a sessão protegida. Senhas e tokens nunca aparecem no log.
 
-SEGURANÇA
-- Tokens e credenciais internas ficam somente na memória durante a sessão.
-- O diagnóstico não imprime token, e-mail, senha, serial ou credenciais do dispositivo.
-- Use “SAIR E LIMPAR DADOS DA CONTA” para remover os dados da sessão da memória.
-
-Se o teste falhar, clique em Copiar e envie somente o diagnóstico exibido.
-O pacote contém componentes oficiais do VMS XMEye; não o redistribua publicamente.
+Se houver falha, use Configurações > Exportar diagnóstico. Não envie prints que
+revelem QR, e-mail, serial completo ou outras credenciais.

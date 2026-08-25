@@ -435,7 +435,10 @@ internal static class QrCloudApi
                 DeviceUser = deviceUser,
                 DevicePassword = devicePassword,
                 AdminToken = adminToken,
-                IsShared = isShared
+                IsShared = isShared,
+                Model = FirstString(element, "devType", "model", "deviceType", "type"),
+                Firmware = FirstString(element, "softVersion", "firmware", "version", "softwareVersion"),
+                ProductId = FirstString(element, "pid", "productId", "productID")
             });
         }
 

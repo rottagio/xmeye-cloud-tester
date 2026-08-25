@@ -19,6 +19,35 @@ internal static class CmsSdk
         public int ID;
     }
 
+    // Estrutura reconstruída a partir do construtor RecordPlanUnit do VMS Pro.
+    [StructLayout(LayoutKind.Explicit, Size = 0x18)]
+    internal struct RecordPlanUnit
+    {
+        [FieldOffset(0x00)] public int Window;
+        [FieldOffset(0x04)] public byte Enabled;
+        [FieldOffset(0x06)] public ushort DaysMask;
+        [FieldOffset(0x08)] public int StartSecond;
+        [FieldOffset(0x0C)] public int EndSecond;
+        [FieldOffset(0x10)] public byte Day0;
+        [FieldOffset(0x11)] public byte Day1;
+        [FieldOffset(0x12)] public byte Day2;
+        [FieldOffset(0x13)] public byte Day3;
+        [FieldOffset(0x14)] public byte Day4;
+        [FieldOffset(0x15)] public byte Day5;
+        [FieldOffset(0x16)] public byte Day6;
+        [FieldOffset(0x17)] public byte Day7;
+
+        internal static RecordPlanUnit Create(int window, bool enabled) => new()
+        {
+            Window = window,
+            Enabled = enabled ? (byte)1 : (byte)0,
+            DaysMask = 1,
+            EndSecond = 0x1517F,
+            Day0 = 1, Day1 = 1, Day2 = 1, Day3 = 1,
+            Day4 = 1, Day5 = 1, Day6 = 1, Day7 = 1
+        };
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void MessageCallback(
         MessageType type, int p1, int p2, int p3, int p4,
@@ -92,6 +121,15 @@ internal static class CmsSdk
         string cloudId, string user, string password, string adminToken, int vendor,
         string name, int groupId, [MarshalAs(UnmanagedType.I1)] bool shared);
 
+    // Assinatura x64 confirmada no wrapper CGlobalLogic::addDevice do VMS Pro.
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int CMS_Client_AddDeviceByIP(
+        string ip, int port, string user, string password, int vendor,
+        string name, int groupId, int channelCount, int deviceType, int protocol);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int CMS_Client_GetDeviceByIP(string ip, ref DeviceInfo info);
+
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern int CMS_Client_GetDeviceByCloudID(string cloudId, int loginType, ref DeviceInfo info);
 
@@ -137,4 +175,39 @@ internal static class CmsSdk
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_StopPreviewByWnd(int windowNumber, int userSource);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_OpenSound(int windowNumber);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_CloseSound(int windowNumber);
+
+    // Assinaturas confirmadas nos wrappers CGlobalLogic do VMS Pro x64.
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_OpenTalk(
+        int audioInputDevice, [MarshalAs(UnmanagedType.I1)] bool open);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CMS_Client_StartTalk(int deviceId, int channel);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CMS_Client_StopTalk(int deviceId, int channel);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SendPTZCommand(
+        int windowNumber, int command, int speed, int stop);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool CMS_Client_isSounding(int windowNumber);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool CMS_Client_isRecording(int windowNumber);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_GetRecordPlan(int windowNumber, ref RecordPlanUnit plan);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SetRecordPlan(ref RecordPlanUnit plan);
 }

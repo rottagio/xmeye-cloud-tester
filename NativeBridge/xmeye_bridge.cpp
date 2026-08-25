@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <cstring>
 #include <cwctype>
+#include <list>
 #include <string>
 
 namespace {
@@ -13,6 +14,19 @@ T proc(HMODULE module, const char* name) {
 
 std::wstring qtDiagnosticPath;
 volatile LONG deviceStoreConfiguration = 0;
+
+// ABI confirmado no VMS Pro: tres campos simples seguidos por
+// std::list<std::string> no offset 0x10. O CMS exige ao menos um destino
+// nesta lista antes de iniciar a gravacao ao vivo.
+struct RecordSettings {
+    int reserveSpaceMb = 5000;
+    int packetMinutes = 60;
+    bool overwrite = true;
+    unsigned char padding[7]{};
+    std::list<std::string> destinations;
+};
+static_assert(offsetof(RecordSettings, destinations) == 0x10,
+    "RecordSettings ABI mismatch");
 
 std::wstring readQString(const void* value) {
     if (!value) return {};
@@ -369,4 +383,19 @@ extern "C" __declspec(dllexport) int __cdecl XMEye_QueryDeviceStatus(const char*
     stringCtor(&qCloudId, cloudId);
     // O export recebe QString por valor e destroi a copia ABI internamente.
     return queryDeviceStatus(&qCloudId);
+}
+
+extern "C" __declspec(dllexport) int __cdecl XMEye_ConfigureRecording(
+    const char* destination) {
+    if (!destination || !*destination) return -9761;
+    HMODULE cms = GetModuleHandleW(L"CMSClient.dll");
+    if (!cms) return -9762;
+
+    using SetRecordSettings = int (__cdecl*)(RecordSettings*);
+    auto setRecordSettings = proc<SetRecordSettings>(cms, "CMS_Client_SetRecordSettings");
+    if (!setRecordSettings) return -9763;
+
+    RecordSettings settings;
+    settings.destinations.emplace_back(destination);
+    return setRecordSettings(&settings);
 }
