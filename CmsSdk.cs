@@ -172,6 +172,25 @@ internal static class CmsSdk
         return false;
     }
 
+    internal static unsafe string GetOemId(ref DeviceInfo info)
+    {
+        fixed (byte* value = info.OemId)
+        {
+            int length = 0;
+            while (length < 0x10 && value[length] != 0)
+                length++;
+            if (length == 0)
+                return string.Empty;
+            ReadOnlySpan<byte> bytes = new(value, length);
+            bool printable = true;
+            foreach (byte item in bytes)
+                printable &= item is >= 0x20 and <= 0x7E;
+            return printable
+                ? System.Text.Encoding.ASCII.GetString(bytes)
+                : Convert.ToHexString(bytes);
+        }
+    }
+
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_DeviceLoginOrLogout(int deviceId, [MarshalAs(UnmanagedType.I1)] bool login);
 

@@ -246,6 +246,7 @@ public partial class MainWindow : Window
     private bool isClosing;
     private readonly AppPreferences preferences = AppPreferences.Load();
     private readonly CameraCatalogStore cameraCatalog = CameraCatalogStore.Load();
+    private readonly DeviceProfileStore deviceProfiles = DeviceProfileStore.Load();
     private bool preferencesReady;
     private int currentLayoutSlots = 1;
     private int selectedPreviewWindow = -1;
@@ -1679,6 +1680,37 @@ public partial class MainWindow : Window
         {
             if (state.Requested)
                 return;
+
+            CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+                item.CmsDeviceId == targetDeviceId ||
+                deviceCloudIds.TryGetValue(targetDeviceId, out string? cloudId) &&
+                string.Equals(item.CloudId, cloudId, StringComparison.Ordinal));
+            if (device is not null)
+            {
+                CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+                if (deviceProfiles.TryGetCurrentCapability(
+                        device.CloudId, "SupportPTZDirectionControl", out bool cachedSupport) &&
+                    entry.PtzSupportedChannels.Count > 0)
+                {
+                    state.DeviceSupportsPtz = cachedSupport;
+                    foreach (int channel in entry.PtzSupportedChannels.Keys)
+                    {
+                        entry.PtzMirrorChannels.TryGetValue(channel, out bool mirror);
+                        entry.PtzFlipChannels.TryGetValue(channel, out bool flip);
+                        state.Channels[channel] = (mirror, flip);
+                    }
+                    state.Requested = true;
+                    Log($"Capacidade PTZ reutilizada do perfil local: dispositivo {targetDeviceId}; nenhuma consulta enviada.");
+                    return;
+                }
+            }
+
+            if (!CanIssueDeviceRequest(targetDeviceId, out TimeSpan wait, out _, out int lastError))
+            {
+                Log($"Consulta de capacidade PTZ suprimida: dispositivo {targetDeviceId}; " +
+                    $"erro {lastError}; espera restante {Math.Ceiling(wait.TotalMinutes)} min.");
+                return;
+            }
             state.Requested = true;
         }
 
@@ -1948,6 +1980,8 @@ public partial class MainWindow : Window
                     }
                 }
             }
+            if (command == SystemFunctionCommand)
+                RecordSystemFunctionProfile(targetDeviceId, document.RootElement);
             Dispatcher.BeginInvoke((Action)(() => ApplyPtzCapability(targetDeviceId)));
         }
         catch
@@ -1986,6 +2020,16 @@ public partial class MainWindow : Window
             entry.PtzFlipChannels[channel] = orientation.Flip;
         }
         SaveCameraCatalog();
+        bool profileChanged = deviceProfiles.UpdateIdentity(
+            device, entry, GetLocalOemId(device));
+        profileChanged |= deviceProfiles.RecordCapability(
+            device.CloudId, "PTZ.Direction", supported == true, "SystemFunction");
+        foreach (int channel in channels.Keys)
+            profileChanged |= deviceProfiles.RecordCapability(
+                device.CloudId, $"PTZ.Channel.{channel + 1}", supported == true,
+                "Uart.PTZControlCmd");
+        if (profileChanged)
+            SaveDeviceProfiles();
         int supportedChannels = entry.PtzSupportedChannels.Count(item => item.Value);
         Log($"Capacidade PTZ confirmada: dispositivo {targetDeviceId}; canais suportados {supportedChannels}; orientação aplicada.");
         if (selectedPreviewWindow >= 0 && previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
@@ -1999,6 +2043,12 @@ public partial class MainWindow : Window
             !SupportsPtz(binding))
         {
             SelectedCameraText.Text = "PTZ indisponível neste canal";
+            return;
+        }
+        if (!CanIssueDeviceRequest(binding.DeviceId, out TimeSpan wait, out _, out int lastError))
+        {
+            SelectedCameraText.Text = $"Comando suspenso: aguarde {Math.Ceiling(wait.TotalMinutes)} min";
+            Log($"PTZ favorito suprimido: dispositivo {binding.DeviceId}; erro {lastError}; nenhuma requisição enviada.");
             return;
         }
         // VMS Pro keeps the configured PTZ speed in the third argument and
@@ -2015,6 +2065,10 @@ public partial class MainWindow : Window
         if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow) ||
             !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding) ||
             !SupportsPtz(binding))
+            return;
+        // O comando de parada precisa sempre acompanhar um movimento já
+        // iniciado; suprimi-lo poderia deixar o motor ativo até o timeout.
+        if (!stop && !CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
             return;
         int nativeCommand = stop ? command : MapPtzDirection(binding, command);
         int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, nativeCommand, 5, stop ? 1 : 0);
@@ -3319,7 +3373,10 @@ public partial class MainWindow : Window
             }
 
             if (channelKnowledgeChanged)
+            {
                 SaveCameraCatalog();
+                RefreshDeviceProfilesFromKnownData();
+            }
 
             int reconnecting = 0;
             foreach ((CloudApi.AccountDevice device, int channel) in requests)
@@ -3492,6 +3549,63 @@ public partial class MainWindow : Window
         var info = new CmsSdk.DeviceInfo();
         int found = GetCmsDeviceInfo(cloudId, ref info);
         return found != 0 ? info.ID : 0;
+    }
+
+    private string GetLocalOemId(CloudApi.AccountDevice device)
+    {
+        var info = new CmsSdk.DeviceInfo();
+        int found = GetCmsDeviceInfo(device.CloudId, ref info);
+        return found != 0 && info.ID > 0 ? CmsSdk.GetOemId(ref info) : string.Empty;
+    }
+
+    private void RefreshDeviceProfilesFromKnownData()
+    {
+        bool changed = false;
+        foreach (CloudApi.AccountDevice device in accountDevices)
+        {
+            CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+            changed |= deviceProfiles.UpdateIdentity(device, entry, GetLocalOemId(device));
+        }
+        if (changed)
+            SaveDeviceProfiles();
+    }
+
+    private void RecordSystemFunctionProfile(int targetDeviceId, JsonElement root)
+    {
+        if (!deviceCloudIds.TryGetValue(targetDeviceId, out string? cloudId))
+        {
+            CloudApi.AccountDevice? matched = accountDevices.FirstOrDefault(device =>
+                device.CmsDeviceId == targetDeviceId);
+            cloudId = matched?.CloudId;
+        }
+        if (string.IsNullOrWhiteSpace(cloudId))
+            return;
+
+        // Persist only a small allow-list of boolean evidence. The native JSON
+        // itself is never stored because it can contain device metadata.
+        string[] capabilityKeys =
+        [
+            "SupportPTZDirectionControl",
+            "SupportHumanDetection",
+            "SupportDoubleLightCamera",
+            "SupportAlarmVoiceTipInterval",
+            "SupportDVRAlarmSound",
+            "SupportIPCAlarmSound",
+            "SupportCloudUpgradeConfig"
+        ];
+        bool changed = false;
+        foreach (string capability in capabilityKeys)
+            if (TryFindBoolean(root, capability, out bool supported))
+                changed |= deviceProfiles.RecordCapability(
+                    cloudId, capability, supported, "SystemFunction");
+        if (changed)
+            SaveDeviceProfiles();
+    }
+
+    private void SaveDeviceProfiles()
+    {
+        try { deviceProfiles.Save(); }
+        catch (Exception ex) { Log("Não foi possível salvar o perfil técnico local: " + ex.Message); }
     }
 
     private void TrackDeviceRequestProtection(CloudApi.AccountDevice device, int cmsDeviceId)
@@ -4097,16 +4211,14 @@ public partial class MainWindow : Window
             if (found != 0 && existing.ID > 0)
             {
                 TrackDeviceRequestProtection(device, existing.ID);
-                // As versoes anteriores gravaram por engano o upass do QR
-                // (144 caracteres). Quando a lista devolver a credencial
-                // individual de 16 caracteres, substitui esse cadastro ruim.
-                // Sem uma senha individual confirmada, preserva o registro.
-                if (device.DevicePassword.Length != 16)
-                {
-                    synchronized++;
-                    continue;
-                }
-                CmsSdk.CMS_Client_RemoveDevice(existing.ID);
+                // Sincronizar a conta nunca deve remover e recriar um cadastro
+                // existente. Essa operação reinicia a máquina de login P2P e,
+                // multiplicada por todas as câmeras a cada abertura do app,
+                // pode produzir a rajada que termina em bloqueio -27.
+                // Credenciais só são substituídas por uma ação explícita do
+                // usuário na tela da câmera.
+                synchronized++;
+                continue;
             }
 
             int added = RegisterDeviceToCms(device);
@@ -4145,6 +4257,7 @@ public partial class MainWindow : Window
         cameraCatalog.ApplyAndSort(accountDevices);
         try { cameraCatalog.Save(); }
         catch (Exception ex) { Log("Nao foi possivel salvar a organizacao das cameras: " + ex.Message); }
+        RefreshDeviceProfilesFromKnownData();
         if (accountDevices.Count > 0 && CloudSessionStore.Exists && !onlineRefreshTimer.IsEnabled)
             onlineRefreshTimer.Start();
     }
@@ -4209,11 +4322,16 @@ public partial class MainWindow : Window
         CameraUserBox.Text = device.DeviceUser;
         CameraPasswordBox.Clear();
         CameraSerialText.Text = $"Serial protegido: {device.MaskedCloudId}";
+        string profileSummary = deviceProfiles.BuildTechnicalSummary(device.CloudId);
         string[] details = new[]
         {
-            string.IsNullOrWhiteSpace(device.Model) ? null : "Modelo: " + device.Model,
-            string.IsNullOrWhiteSpace(device.Firmware) ? null : "Firmware: " + device.Firmware,
-            string.IsNullOrWhiteSpace(device.ProductId) ? null : "PID: " + device.ProductId,
+            string.IsNullOrWhiteSpace(profileSummary) ? null : profileSummary,
+            string.IsNullOrWhiteSpace(profileSummary) && !string.IsNullOrWhiteSpace(device.Model)
+                ? "Modelo informado: " + device.Model : null,
+            string.IsNullOrWhiteSpace(profileSummary) && !string.IsNullOrWhiteSpace(device.Firmware)
+                ? "Firmware: " + device.Firmware : null,
+            string.IsNullOrWhiteSpace(profileSummary) && !string.IsNullOrWhiteSpace(device.ProductId)
+                ? "PID: " + device.ProductId : null,
             entry.ChannelCountOverride is 1 or 2
                 ? $"Canais configurados: {entry.ChannelCountOverride.Value}"
                 : entry.DetectedChannelCount is 1 or 2
@@ -4544,6 +4662,8 @@ public partial class MainWindow : Window
         catch { }
         accountDevices.Remove(device);
         cameraCatalog.Cameras.Remove(device.CloudId);
+        if (deviceProfiles.Remove(device.CloudId))
+            SaveDeviceProfiles();
         cameraCatalog.NormalizeOrder(accountDevices);
         SaveCameraCatalog();
         DeviceBox.ItemsSource = null;
