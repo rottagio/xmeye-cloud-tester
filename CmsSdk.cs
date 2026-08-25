@@ -71,6 +71,11 @@ internal static class CmsSdk
         public int ConnectionType;
         [FieldOffset(0x3D1)]
         public fixed byte OemId[0x10];
+        // Flags por canal preenchidas por Uart.PTZControlCmd no VMS Pro.
+        [FieldOffset(0x4A1)]
+        public fixed byte FlipOperation[0x40];
+        [FieldOffset(0x4E1)]
+        public fixed byte MirrorOperation[0x40];
         [FieldOffset(0x56D)]
         public byte Shared;
         [FieldOffset(0x56E)]
@@ -135,6 +140,11 @@ internal static class CmsSdk
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_EditDevice(int deviceId, ref DeviceInfo info);
+
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_GetDeviceConfig(
+        int deviceId, int channel, int commandId,
+        IntPtr buffer, int bufferSize, int timeout);
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_RemoveDevice(int deviceId);

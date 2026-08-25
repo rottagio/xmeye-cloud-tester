@@ -26,6 +26,7 @@ internal static class CloudApi
         internal bool IsShared { get; init; }
         public string LocalGroup { get; set; } = "Casa";
         public bool ShowInLiveView { get; set; } = true;
+        public bool Paused { get; set; }
         public string Model { get; init; } = string.Empty;
         public string Firmware { get; init; } = string.Empty;
         public string ProductId { get; init; } = string.Empty;

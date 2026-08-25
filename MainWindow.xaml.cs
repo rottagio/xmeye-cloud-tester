@@ -5,6 +5,7 @@ using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -39,6 +40,156 @@ public partial class MainWindow : Window
             IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
     }
 
+    private sealed class CameraHeaderLabel : Forms.Label
+    {
+        protected override void OnPaint(Forms.PaintEventArgs e)
+        {
+            e.Graphics.Clear(BackColor);
+
+            const int dotSize = 7;
+            int dotY = Math.Max(0, (Height - dotSize) / 2);
+            using (var dotBrush = new System.Drawing.SolidBrush(ForeColor))
+                e.Graphics.FillEllipse(dotBrush, 8, dotY, dotSize, dotSize);
+
+            string caption = Text.StartsWith("● ", StringComparison.Ordinal)
+                ? Text[2..]
+                : Text;
+            var textBounds = new System.Drawing.Rectangle(
+                21,
+                0,
+                Math.Max(0, Width - 26),
+                Height);
+            Forms.TextRenderer.DrawText(
+                e.Graphics,
+                caption,
+                Font,
+                textBounds,
+                System.Drawing.Color.White,
+                Forms.TextFormatFlags.Left |
+                Forms.TextFormatFlags.VerticalCenter |
+                Forms.TextFormatFlags.SingleLine |
+                Forms.TextFormatFlags.EndEllipsis |
+                Forms.TextFormatFlags.NoPrefix);
+        }
+    }
+
+    private sealed class PtzChevronControl : Forms.Control
+    {
+        private readonly int direction;
+        private readonly Forms.Timer fadeTimer = new() { Interval = 15 };
+        private float currentOpacity = 0.18F;
+        private float targetOpacity = 0.18F;
+
+        internal PtzChevronControl(int direction)
+        {
+            this.direction = direction;
+            SetStyle(
+                Forms.ControlStyles.UserPaint |
+                Forms.ControlStyles.AllPaintingInWmPaint |
+                Forms.ControlStyles.OptimizedDoubleBuffer |
+                Forms.ControlStyles.SupportsTransparentBackColor,
+                true);
+            BackColor = System.Drawing.Color.Transparent;
+            Cursor = Forms.Cursors.Hand;
+            TabStop = false;
+            Size = new System.Drawing.Size(32, 32);
+            fadeTimer.Tick += (_, _) => AnimateOpacity();
+            RebuildRegion();
+        }
+
+        private System.Drawing.PointF[] ChevronPoints(float inset)
+        {
+            float left = inset;
+            float top = inset;
+            float right = Math.Max(left, ClientSize.Width - inset - 1);
+            float bottom = Math.Max(top, ClientSize.Height - inset - 1);
+            float centerX = ClientSize.Width / 2F;
+            float centerY = ClientSize.Height / 2F;
+            return direction switch
+            {
+                0 => [new(left, bottom), new(centerX, top), new(right, bottom)],
+                1 => [new(left, top), new(centerX, bottom), new(right, top)],
+                2 => [new(right, top), new(left, centerY), new(right, bottom)],
+                _ => [new(left, top), new(right, centerY), new(left, bottom)]
+            };
+        }
+
+        private void RebuildRegion()
+        {
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+                return;
+            using var path = new System.Drawing.Drawing2D.GraphicsPath();
+            path.AddLines(ChevronPoints(6F));
+            // A região coincide com o stroke. O recorte anterior usava 15 px,
+            // deixando uma faixa preta larga sobre a janela nativa de vídeo.
+            using var hitPen = new System.Drawing.Pen(System.Drawing.Color.White, 2.6F)
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+            path.Widen(hitPen);
+            Region?.Dispose();
+            Region = new System.Drawing.Region(path);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            RebuildRegion();
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            targetOpacity = 0.60F;
+            fadeTimer.Start();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            targetOpacity = 0.18F;
+            fadeTimer.Start();
+            base.OnMouseLeave(e);
+        }
+
+        private void AnimateOpacity()
+        {
+            const float durationSteps = 10F; // 10 x 15 ms = 150 ms
+            float delta = (targetOpacity - currentOpacity) / durationSteps;
+            if (Math.Abs(targetOpacity - currentOpacity) < 0.012F)
+            {
+                currentOpacity = targetOpacity;
+                fadeTimer.Stop();
+            }
+            else
+            {
+                currentOpacity += delta;
+            }
+            Invalidate();
+        }
+
+        protected override void OnPaintBackground(Forms.PaintEventArgs e)
+        {
+            // O vídeo é uma janela nativa: não desenhar um retângulo sobre ele.
+        }
+
+        protected override void OnPaint(Forms.PaintEventArgs e)
+        {
+            // A região do HWND já é somente o stroke do chevron. Preenchê-la
+            // por inteiro evita fundo, outline, sombra e artefatos de transparência.
+            int intensity = Math.Clamp((int)Math.Round(255F * currentOpacity), 0, 255);
+            e.Graphics.Clear(System.Drawing.Color.FromArgb(intensity, intensity, intensity));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                fadeTimer.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
     private readonly Forms.TableLayoutPanel videoGrid = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -49,7 +200,7 @@ public partial class MainWindow : Window
     private readonly List<Forms.Label> videoLabels = [];
     private readonly List<Forms.Label> videoBadges = [];
     private readonly List<Forms.Panel> videoContainers = [];
-    private readonly List<Forms.Panel> videoHoverPanels = [];
+    private PtzChevronControl[] videoPtzEdgeButtons = [];
     private readonly HashSet<int> activePreviewWindows = [];
     private readonly ConcurrentDictionary<int, PreviewBinding> previewBindings = new();
     private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
@@ -57,6 +208,22 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
+    private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
+    private readonly ConcurrentDictionary<int, DeviceRequestProtection> deviceRequestProtections = new();
+    private readonly ConcurrentDictionary<int, string> deviceCloudIds = new();
+    private static readonly TimeSpan DeviceBlockCooldown = TimeSpan.FromHours(1);
+    private const int SystemFunctionCommand = 1360;
+    private const int PtzControlConfigCommand = 0x175;
+    private const int DeviceConfigBufferSize = 64 * 1024;
+    private readonly ConcurrentDictionary<int, PtzCapabilityState> ptzCapabilities = new();
+    private readonly ConcurrentDictionary<(int DeviceId, int Command), IntPtr> pendingPtzConfigBuffers = new();
+    private readonly object ptzLogLock = new();
+    private long ptzLogOffset = -1;
+    private string ptzLogRemainder = string.Empty;
+    private readonly Queue<string> ptzSystemResponses = new();
+    private readonly Queue<string> ptzOrientationResponses = new();
+    private readonly Queue<int> pendingPtzSystemDevices = new();
+    private readonly Queue<int> pendingPtzOrientationDevices = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
@@ -72,6 +239,7 @@ public partial class MainWindow : Window
     private string captchaToken = string.Empty;
     private CancellationTokenSource? qrLoginCts;
     private bool qrBusy;
+    private bool accountLogoutInProgress;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
     private volatile int previewLoginError;
@@ -85,6 +253,7 @@ public partial class MainWindow : Window
     private int audioDisplayPreviewWindow = -1;
     private int talkingDeviceId = -1;
     private int talkingChannel = -1;
+    private bool talkInputOpen;
     private int activePtzCommand = -1;
     private readonly HashSet<int> recordingPreviewWindows = [];
     private readonly HashSet<int> mirroredPreviewWindows = [];
@@ -100,12 +269,20 @@ public partial class MainWindow : Window
     {
         Interval = TimeSpan.FromMilliseconds(900)
     };
+    private readonly bool controlledRequestTest = string.Equals(
+        Environment.GetEnvironmentVariable("XMEYE_CONTROLLED_REQUEST_TEST"),
+        "1",
+        StringComparison.Ordinal);
     private readonly Forms.Timer cameraHoverTimer = new()
     {
         Interval = 220
     };
     private bool onlineRefreshBusy;
     private bool gridOpening;
+    private readonly object gridLayoutQueueSync = new();
+    private bool gridLayoutWorkerRunning;
+    private int? queuedGridLayoutSlots;
+    private Task gridLayoutWorker = Task.CompletedTask;
     private readonly Forms.Panel recordingPlaybackPanel = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -132,6 +309,22 @@ public partial class MainWindow : Window
     private sealed record PreviewBinding(
         int DeviceId, int Window, int Channel, CmsSdk.StreamType StreamType,
         string DisplayName, string CloudId, long Generation);
+
+    private sealed class DeviceRequestProtection
+    {
+        internal readonly object Sync = new();
+        internal int ConsecutiveFailures;
+        internal int LastError;
+        internal DateTime LastFailureUtc;
+        internal DateTime NextAllowedUtc;
+    }
+
+    private sealed class PtzCapabilityState
+    {
+        internal bool Requested;
+        internal bool? DeviceSupportsPtz;
+        internal readonly Dictionary<int, (bool Mirror, bool Flip)> Channels = [];
+    }
 
     private sealed class LocalMediaItem : INotifyPropertyChanged
     {
@@ -163,6 +356,8 @@ public partial class MainWindow : Window
         File.WriteAllText(diagnosticPath, string.Empty);
         sdkCallback = OnSdkMessage;
         InitializeComponent();
+        if (controlledRequestTest)
+            preferences.AutoReconnect = false;
         RestoreLayoutBox.IsChecked = preferences.RestoreLastLayout;
         AutoReconnectBox.IsChecked = preferences.AutoReconnect;
         DefaultQualityBox.SelectedIndex = preferences.DefaultSd ? 0 : 1;
@@ -211,6 +406,8 @@ public partial class MainWindow : Window
         onlineRefreshTimer.Tick += async (_, _) => await RefreshOnlineDevicesAsync(false);
         Log($"Diagnostico iniciado: sessao {diagnosticSession}; versao {version.Major}.{version.Minor}.{version.Build}; " +
             $"Windows {Environment.OSVersion.Version}; processo {RuntimeInformation.ProcessArchitecture}.");
+        if (!string.IsNullOrWhiteSpace(App.AccountLogoutCleanupMessage))
+            Log(App.AccountLogoutCleanupMessage);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -220,8 +417,15 @@ public partial class MainWindow : Window
             return;
         if (await TryRestoreSavedSessionAsync())
         {
-            if (preferences.RestoreLastLayout && accountDevices.Count > 0)
+            if (controlledRequestTest)
+            {
+                Log("MODO DE TESTE CONTROLADO: sessão restaurada sem abrir a grade e sem reconexão automática.");
+            }
+            else if (preferences.RestoreLastLayout && accountDevices.Count > 0)
+            {
+                await WaitForCmsMonitorBeforeAutoPlayAsync(TimeSpan.FromSeconds(15));
                 await OpenGridAsync(preferences.LastGridSize);
+            }
             return;
         }
         RestoreManualCatalogDevices();
@@ -238,9 +442,7 @@ public partial class MainWindow : Window
             Environment.SetEnvironmentVariable("QT_PLUGIN_PATH", plugins + ";" + baseDirectory);
             Environment.SetEnvironmentVariable("QT_QPA_PLATFORM_PLUGIN_PATH", Path.Combine(plugins, "platforms"));
 
-            string dataDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "XMEyeCloudAccountTester-CMS-v3");
+            string dataDirectory = GetCmsDataDirectory();
             Directory.CreateDirectory(dataDirectory);
             EnsureCmsDataLayout(dataDirectory);
             string sourceConfig = Path.Combine(baseDirectory, "config.ini");
@@ -361,9 +563,12 @@ public partial class MainWindow : Window
 
             cloudGroupId = ushort.MaxValue;
             ClearAccountDevices();
-            IReadOnlyList<CloudApi.AccountDevice> devices = await Task.Run(
+            List<CloudApi.AccountDevice> devices = (await Task.Run(
                 () => QrCloudApi.GetDevices(
-                    saved.AccessToken, saved.LocalUser, saved.LocalPassword));
+                    saved.AccessToken, saved.LocalUser, saved.LocalPassword))).ToList();
+            // A pausa precisa ser conhecida antes da sincronização e da primeira
+            // consulta ao CMS; aplicá-la depois ainda permitiria uma requisição.
+            cameraCatalog.ApplyAndSort(devices);
             (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
             int deviceLinkMonitor = await Task.Run(
                 () => CmsSdk.CMS_Client_StartCheckDevLink());
@@ -389,6 +594,7 @@ public partial class MainWindow : Window
                 : "Cadastro local da conta carregado sem depender do VMS Pro.");
             Log($"Canal oficial MQTT da sessao restaurada: {mqttResult}; banco local {(localStoreReady ? "pronto" : "tempo esgotado")}; monitor {deviceLinkMonitor}.");
             Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
+            Log("Monitor interno do CMS iniciado; nenhuma consulta individual foi enviada aos dispositivos.");
             return true;
         }
         catch (Exception ex)
@@ -503,11 +709,13 @@ public partial class MainWindow : Window
                 // tabela Groups fica vazia e todos os dispositivos usam 65535.
                 cloudGroupId = ushort.MaxValue;
                 ClearAccountDevices();
-                IReadOnlyList<CloudApi.AccountDevice> devices =
-                    await Task.Run(
+                List<CloudApi.AccountDevice> devices = (await Task.Run(
                         () => QrCloudApi.GetDevices(
                             status.AccessToken, status.LocalUser, status.LocalPassword),
-                        cancellationToken);
+                        cancellationToken)).ToList();
+                // Bloqueios locais entram antes de qualquer sincronização ou
+                // consulta de estado, nunca depois do primeiro pedido.
+                cameraCatalog.ApplyAndSort(devices);
                 (int synchronized, int failed) = SynchronizeAccountDevicesToCms(devices);
                 int deviceLinkMonitor = await Task.Run(
                     () => CmsSdk.CMS_Client_StartCheckDevLink(),
@@ -524,6 +732,13 @@ public partial class MainWindow : Window
                 Log($"Banco local do CMS apos o QR: {(localStoreReady ? "pronto" : "tempo esgotado")}.");
                 Log($"Monitor oficial de vinculo dos dispositivos iniciado: {deviceLinkMonitor}.");
                 Log("Atualizacao automatica dos cadastros ativada como no VMS Pro.");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (accountLogoutInProgress)
+                {
+                    Log("Login QR descartado porque o logout da conta esta em andamento.");
+                    return;
+                }
+
                 cloudAccessToken = status.AccessToken;
                 CloudSessionStore.Save(new CloudSessionStore.Session(
                     status.AccessToken,
@@ -554,6 +769,7 @@ public partial class MainWindow : Window
                     Log($"Credencial individual da lista: senha direta {parse.DirectPasswordPresent}/{accountDevices.Count}; tamanho oficial 16 em {parse.PasswordLength16}/{accountDevices.Count}.");
                     Log($"Credencial técnica do QR aplicada: usuário {parse.SessionUserFallback}; senha {parse.SessionPasswordFallback}.");
                     Log($"Lista local do CMS sincronizada: {synchronized}/{accountDevices.Count}; falhas {failed}.");
+                    Log("Monitor interno do CMS iniciado; nenhuma consulta individual foi enviada aos dispositivos.");
                     Log("As cameras serao abertas somente apos o callback final do login automatico.");
                 }
                 else
@@ -657,6 +873,7 @@ public partial class MainWindow : Window
             Log($"Conta autenticada pelo fluxo oficial do VMS. Cameras encontradas: {accountDevices.Count}.");
             Log($"Banco local {(localStoreReady ? "pronto" : "tempo esgotado")}; " +
                 $"lista CMS {synchronized}/{accountDevices.Count}; falhas {failed}; monitor {deviceLinkMonitor}.");
+            Log("Monitor interno do CMS iniciado; nenhuma consulta individual foi enviada aos dispositivos.");
             Log("A senha da conta nao foi salva. Para entrada automatica futura, use o QR uma vez.");
         }
         catch (Exception ex)
@@ -845,6 +1062,12 @@ public partial class MainWindow : Window
         };
 
         videoGrid.SuspendLayout();
+        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
+        {
+            edge.Parent?.Controls.Remove(edge);
+            edge.Dispose();
+        }
+        videoPtzEdgeButtons = [];
         foreach (Forms.Control control in videoGrid.Controls.Cast<Forms.Control>().ToArray())
             control.Dispose();
         videoGrid.Controls.Clear();
@@ -862,16 +1085,16 @@ public partial class MainWindow : Window
         videoLabels.Clear();
         videoBadges.Clear();
         videoContainers.Clear();
-        videoHoverPanels.Clear();
         mirroredPreviewWindows.Clear();
         for (int index = 0; index < side * side; index++)
         {
             int window = index;
             var container = new Forms.Panel
             {
-                BackColor = System.Drawing.Color.Black,
+                BackColor = System.Drawing.Color.FromArgb(43, 57, 73),
                 Dock = Forms.DockStyle.Fill,
                 Margin = new Forms.Padding(1),
+                Padding = new Forms.Padding(1),
                 AllowDrop = true
             };
             var panel = new Forms.Panel
@@ -880,7 +1103,7 @@ public partial class MainWindow : Window
                 Dock = Forms.DockStyle.Fill,
                 Margin = Forms.Padding.Empty
             };
-            var label = new Forms.Label
+            var label = new CameraHeaderLabel
             {
                 AutoEllipsis = true,
                 BackColor = System.Drawing.Color.Black,
@@ -908,49 +1131,22 @@ public partial class MainWindow : Window
                 Visible = false,
                 Anchor = Forms.AnchorStyles.Top | Forms.AnchorStyles.Right
             };
-            var hover = new Forms.FlowLayoutPanel
-            {
-                AutoSize = false,
-                Width = 144,
-                Height = 68,
-                BackColor = System.Drawing.Color.FromArgb(215, 8, 20, 33),
-                FlowDirection = Forms.FlowDirection.LeftToRight,
-                Padding = new Forms.Padding(3),
-                Margin = Forms.Padding.Empty,
-                Visible = false,
-                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
-                WrapContents = true
-            };
-            AddHoverButton(hover, "🔊", "Ouvir/silenciar", () => ToggleAudio_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "🎙", "Falar", () => ToggleTalk_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "📷", "Fotografar", () => CaptureSelected_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "●", "Gravar", () => ToggleRecord_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "◀", "PTZ esquerda", () => SendPtzPulse(2), window);
-            AddHoverButton(hover, "▲", "PTZ acima", () => SendPtzPulse(0), window);
-            AddHoverButton(hover, "▼", "PTZ abaixo", () => SendPtzPulse(1), window);
-            AddHoverButton(hover, "▶", "PTZ direita", () => SendPtzPulse(3), window);
             container.Controls.Add(panel);
             container.Controls.Add(label);
             container.Controls.Add(badge);
-            container.Controls.Add(hover);
             Forms.ContextMenuStrip cameraMenu = CreatePreviewContextMenu(window);
             container.ContextMenuStrip = cameraMenu;
             panel.ContextMenuStrip = cameraMenu;
             label.ContextMenuStrip = cameraMenu;
             badge.ContextMenuStrip = cameraMenu;
-            hover.ContextMenuStrip = cameraMenu;
-            cameraToolTip.SetToolTip(panel, "Clique para selecionar; botão direito para áudio, gravação, PTZ, zoom e outras ações.");
-            cameraToolTip.SetToolTip(label, "Arraste para reorganizar; botão direito para controlar esta câmera.");
             void PositionBadge()
             {
                 badge.Left = Math.Max(2, container.ClientSize.Width - badge.Width - 4);
                 badge.Top = label.Height + 4;
                 if (badge.Visible)
                     badge.BringToFront();
-                hover.Left = Math.Max(2, container.ClientSize.Width - hover.Width - 5);
-                hover.Top = Math.Max(label.Height + 3, container.ClientSize.Height - hover.Height - 5);
-                if (hover.Visible)
-                    hover.BringToFront();
+                if (selectedPreviewWindow == window)
+                    PositionPtzEdgeButtons(container, label);
             }
             container.Resize += (_, _) => PositionBadge();
             PositionBadge();
@@ -968,9 +1164,17 @@ public partial class MainWindow : Window
             videoLabels.Add(label);
             videoBadges.Add(badge);
             videoContainers.Add(container);
-            videoHoverPanels.Add(hover);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
+        // Existem exatamente quatro controles PTZ na árvore visual. Eles são
+        // movidos para o quadro selecionado; nunca são recriados por frame.
+        videoPtzEdgeButtons =
+        [
+            CreatePtzEdgeButton("Mover para cima", 0),
+            CreatePtzEdgeButton("Mover para baixo", 1),
+            CreatePtzEdgeButton("Mover para a esquerda", 2),
+            CreatePtzEdgeButton("Mover para a direita", 3)
+        ];
         selectedPreviewWindow = -1;
         soundingPreviewWindow = -1;
         audioDisplayPreviewWindow = -1;
@@ -989,56 +1193,75 @@ public partial class MainWindow : Window
         videoGrid.ResumeLayout(performLayout: true);
     }
 
-    private void AddHoverButton(
-        Forms.FlowLayoutPanel host, string text, string tooltip, Action action, int window)
+    private PtzChevronControl CreatePtzEdgeButton(string tooltip, int command)
     {
-        var button = new Forms.Button
+        var button = new PtzChevronControl(command)
         {
-            Text = text,
-            Width = 31,
-            Height = 28,
-            FlatStyle = Forms.FlatStyle.Flat,
-            BackColor = System.Drawing.Color.FromArgb(24, 48, 75),
-            ForeColor = System.Drawing.Color.White,
-            Margin = new Forms.Padding(2),
-            Padding = Forms.Padding.Empty,
-            TabStop = false,
-            Cursor = Forms.Cursors.Hand
+            Margin = Forms.Padding.Empty,
+            Visible = false
         };
-        button.FlatAppearance.BorderColor = System.Drawing.Color.FromArgb(55, 91, 127);
-        button.Click += (_, _) =>
+        button.MouseDown += (_, args) =>
         {
-            SelectPreviewWindow(window);
-            action();
+            if (args.Button != Forms.MouseButtons.Left)
+                return;
+            SendPtzCommand(command, stop: false);
         };
-        cameraToolTip.SetToolTip(button, tooltip);
-        host.Controls.Add(button);
+        button.MouseUp += (_, args) =>
+        {
+            if (args.Button == Forms.MouseButtons.Left)
+                StopPtzCommand();
+        };
+        button.MouseLeave += (_, _) => StopPtzCommand();
+        return button;
+    }
+
+    private void PositionPtzEdgeButtons(Forms.Panel container, Forms.Label label)
+    {
+        if (videoPtzEdgeButtons.Length != 4)
+            return;
+        PtzChevronControl up = videoPtzEdgeButtons[0];
+        PtzChevronControl down = videoPtzEdgeButtons[1];
+        PtzChevronControl left = videoPtzEdgeButtons[2];
+        PtzChevronControl right = videoPtzEdgeButtons[3];
+        int videoTop = label.Height;
+        int centerX = Math.Max(0, (container.ClientSize.Width - up.Width) / 2);
+        int centerY = Math.Max(videoTop, videoTop + (container.ClientSize.Height - videoTop - left.Height) / 2);
+        up.Location = new System.Drawing.Point(centerX, videoTop + 10);
+        down.Location = new System.Drawing.Point(
+            centerX,
+            Math.Max(videoTop + 10, container.ClientSize.Height - down.Height - 10));
+        left.Location = new System.Drawing.Point(10, centerY);
+        right.Location = new System.Drawing.Point(
+            Math.Max(10, container.ClientSize.Width - right.Width - 10),
+            centerY);
+        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
+            if (edge.Visible)
+                edge.BringToFront();
     }
 
     private void UpdateCameraHoverControls()
     {
-        if (isClosing || videoContainers.Count != videoHoverPanels.Count)
+        if (isClosing || videoPtzEdgeButtons.Length != 4)
             return;
-        System.Drawing.Point cursor = Forms.Cursor.Position;
-        for (int window = 0; window < videoContainers.Count; window++)
+        if (selectedPreviewWindow < 0 || selectedPreviewWindow >= videoContainers.Count)
         {
-            Forms.Panel container = videoContainers[window];
-            bool show = container.Visible && previewBindings.ContainsKey(window) &&
-                container.RectangleToScreen(container.ClientRectangle).Contains(cursor);
-            if (videoHoverPanels[window].Visible != show)
-            {
-                videoHoverPanels[window].Visible = show;
-                if (show)
-                    videoHoverPanels[window].BringToFront();
-            }
+            foreach (PtzChevronControl edge in videoPtzEdgeButtons)
+                edge.Visible = false;
+            return;
         }
-    }
-
-    private async void SendPtzPulse(int command)
-    {
-        SendPtzCommand(command, stop: false);
-        await Task.Delay(240);
-        StopPtzCommand();
+        System.Drawing.Point cursor = Forms.Cursor.Position;
+        Forms.Panel container = videoContainers[selectedPreviewWindow];
+        bool show = container.Visible && confirmedPreviewWindows.ContainsKey(selectedPreviewWindow) &&
+            previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding) &&
+            SupportsPtz(binding) &&
+            container.RectangleToScreen(container.ClientRectangle).Contains(cursor);
+        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
+        {
+            if (edge.Visible != show)
+                edge.Visible = show;
+            if (show)
+                edge.BringToFront();
+        }
     }
 
     private Forms.ContextMenuStrip CreatePreviewContextMenu(int window)
@@ -1056,7 +1279,7 @@ public partial class MainWindow : Window
         Add("⏺  Iniciar / parar gravação", () => ToggleRecord_Click(this, new RoutedEventArgs()));
         Add("🎙  Falar", () => ToggleTalk_Click(this, new RoutedEventArgs()));
         menu.Items.Add(new Forms.ToolStripSeparator());
-        Add("✥  Selecionar para PTZ", () => PtzCameraText.Text = SelectedCameraText.Text);
+        Forms.ToolStripItem ptzItem = Add("✥  Selecionar para PTZ", () => PtzCameraText.Text = SelectedCameraText.Text);
         Add("↕  Girar 180°", () => _ = RotateSelectedCameraAsync());
         Forms.ToolStripMenuItem mirrorItem = (Forms.ToolStripMenuItem)Add(
             "⇄  Espelhar exibição", ToggleMirrorDisplay);
@@ -1068,6 +1291,8 @@ public partial class MainWindow : Window
             foreach (Forms.ToolStripItem item in menu.Items)
                 if (item is not Forms.ToolStripSeparator)
                     item.Enabled = online || (item.Text?.Contains("Reconectar", StringComparison.Ordinal) == true);
+            ptzItem.Enabled = online && previewBindings.TryGetValue(window, out PreviewBinding? binding) &&
+                SupportsPtz(binding);
             if (!previewBindings.ContainsKey(window))
                 args.Cancel = true;
             mirrorItem.Checked = mirroredPreviewWindows.Contains(window);
@@ -1219,25 +1444,43 @@ public partial class MainWindow : Window
             return;
 
         selectedPreviewWindow = window;
+        Forms.Panel selectedContainer = videoContainers[window];
+        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
+        {
+            if (edge.Parent != selectedContainer)
+            {
+                edge.Parent?.Controls.Remove(edge);
+                selectedContainer.Controls.Add(edge);
+            }
+            edge.ContextMenuStrip = selectedContainer.ContextMenuStrip;
+            edge.Visible = false;
+        }
+        PositionPtzEdgeButtons(selectedContainer, videoLabels[window]);
         for (int index = 0; index < videoContainers.Count; index++)
         {
             bool selected = index == window;
-            videoLabels[index].BackColor = selected
-                ? System.Drawing.Color.FromArgb(16, 62, 108)
-                : System.Drawing.Color.Black;
+            videoLabels[index].BackColor = System.Drawing.Color.Black;
+            videoContainers[index].BackColor = selected
+                ? System.Drawing.Color.FromArgb(0, 157, 229)
+                : System.Drawing.Color.FromArgb(43, 57, 73);
             if (videoLabels[index].Visible)
                 videoLabels[index].BringToFront();
         }
         SelectedCameraText.Text = $"{binding.DisplayName} — Canal {binding.Channel + 1}";
         bool online = confirmedPreviewWindows.ContainsKey(window);
+        if (online)
+            EnsurePtzCapabilityRequested(binding.DeviceId);
         CaptureButton.IsEnabled = online;
         AudioButton.IsEnabled = online;
         RecordButton.IsEnabled = online;
         TalkButton.IsEnabled = online;
-        PtzSidePanel.IsEnabled = online;
-        PtzCameraText.Text = online
+        bool ptzAvailable = online && SupportsPtz(binding);
+        PtzSidePanel.IsEnabled = ptzAvailable;
+        PtzCameraText.Text = ptzAvailable
             ? $"{binding.DisplayName} — Canal {binding.Channel + 1}"
-            : $"{binding.DisplayName} — offline";
+            : online
+                ? $"{binding.DisplayName} — PTZ indisponível neste canal"
+                : $"{binding.DisplayName} — offline";
         SeparateWindowButton.IsEnabled = online;
         LoadSmartControls(binding);
         UpdateAudioButton(window);
@@ -1278,6 +1521,7 @@ public partial class MainWindow : Window
                     Log($"Fala não iniciada: microfone padrão recusado; retorno {microphoneResult}.");
                     return;
                 }
+                talkInputOpen = true;
                 CmsSdk.CMS_Client_StartTalk(binding.DeviceId, talkChannel);
                 talkingDeviceId = binding.DeviceId;
                 talkingChannel = talkChannel;
@@ -1299,15 +1543,20 @@ public partial class MainWindow : Window
     {
         int device = talkingDeviceId;
         int channel = talkingChannel;
+        bool closeTalkInput = talkInputOpen;
         talkingDeviceId = -1;
         talkingChannel = -1;
-        if (device >= 0)
+        talkInputOpen = false;
+        if (sdkReady && device >= 0)
         {
             try { CmsSdk.CMS_Client_StopTalk(device, channel); }
             catch { }
         }
-        try { CmsSdk.CMS_Client_OpenTalk(0, false); }
-        catch { }
+        if (sdkReady && closeTalkInput)
+        {
+            try { CmsSdk.CMS_Client_OpenTalk(0, false); }
+            catch { }
+        }
         TalkButton.Content = "🎙  Falar";
         foreach (PreviewBinding binding in previewBindings.Values.Where(item => item.DeviceId == device))
             RefreshPreviewHeader(binding.Window);
@@ -1359,14 +1608,402 @@ public partial class MainWindow : Window
     private void PtzPresetSave_Click(object sender, RoutedEventArgs e) =>
         SendPtzOneShot(17, SelectedPresetNumber(), "salvar posição favorita");
 
-    private void SendPtzOneShot(int command, int value, string description)
+    private void PtzPresetQuick_Click(object sender, RoutedEventArgs e)
     {
-        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow))
+        if (sender is FrameworkElement element &&
+            int.TryParse(element.Tag?.ToString(), out int preset))
+            SendPtzOneShot(19, preset, "abrir posição favorita");
+    }
+
+    private void PtzPresetQuick_RightClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement element &&
+            int.TryParse(element.Tag?.ToString(), out int preset))
         {
-            SelectedCameraText.Text = "Selecione uma câmera online para usar PTZ";
+            SendPtzOneShot(17, preset, "salvar posição favorita");
+            e.Handled = true;
+        }
+    }
+
+    private bool SupportsPtz(PreviewBinding binding)
+    {
+        if (ptzCapabilities.TryGetValue(binding.DeviceId, out PtzCapabilityState? state))
+        {
+            lock (state)
+                return state.DeviceSupportsPtz == true && state.Channels.ContainsKey(binding.Channel);
+        }
+
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+        if (device is null)
+            return false;
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        return entry.PtzSupportedChannels.TryGetValue(binding.Channel, out bool supported) && supported;
+    }
+
+    private (bool Mirror, bool Flip) PtzOrientation(PreviewBinding binding)
+    {
+        if (ptzCapabilities.TryGetValue(binding.DeviceId, out PtzCapabilityState? state))
+        {
+            lock (state)
+                if (state.Channels.TryGetValue(binding.Channel, out var orientation))
+                    return orientation;
+        }
+
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+        if (device is null)
+            return default;
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        entry.PtzMirrorChannels.TryGetValue(binding.Channel, out bool mirror);
+        entry.PtzFlipChannels.TryGetValue(binding.Channel, out bool flip);
+        return (mirror, flip);
+    }
+
+    private int MapPtzDirection(PreviewBinding binding, int command)
+    {
+        (bool mirror, bool flip) = PtzOrientation(binding);
+        if (mirror && command is 2 or 3)
+            command = command == 2 ? 3 : 2;
+        if (flip && command is 0 or 1)
+            command = command == 0 ? 1 : 0;
+        return command;
+    }
+
+    private void EnsurePtzCapabilityRequested(int targetDeviceId)
+    {
+        if (targetDeviceId <= 0 || isClosing)
+            return;
+        PtzCapabilityState state = ptzCapabilities.GetOrAdd(targetDeviceId, _ => new PtzCapabilityState());
+        lock (state)
+        {
+            if (state.Requested)
+                return;
+            state.Requested = true;
+        }
+
+        InitializePtzLogCursor();
+        RequestPtzConfig(targetDeviceId, SystemFunctionCommand,
+            "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
+        RequestPtzConfig(targetDeviceId, PtzControlConfigCommand,
+            "{\"Name\":\"Uart.PTZControlCmd\",\"SessionID\":\"0x08\"}");
+    }
+
+    private string NetSdkLogPath => Path.Combine(AppContext.BaseDirectory, "Log", "log", "netsdk.log");
+
+    private void InitializePtzLogCursor()
+    {
+        lock (ptzLogLock)
+        {
+            if (ptzLogOffset >= 0)
+                return;
+            try
+            {
+                var file = new FileInfo(NetSdkLogPath);
+                ptzLogOffset = file.Exists ? file.Length : 0;
+            }
+            catch { ptzLogOffset = 0; }
+        }
+    }
+
+    private void ReadNewPtzResponsesLocked()
+    {
+        try
+        {
+            string path = NetSdkLogPath;
+            if (!File.Exists(path))
+                return;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            if (ptzLogOffset < 0)
+                ptzLogOffset = stream.Length;
+            if (stream.Length < ptzLogOffset)
+            {
+                ptzLogOffset = 0;
+                ptzLogRemainder = string.Empty;
+            }
+            if (stream.Length == ptzLogOffset)
+                return;
+            stream.Position = ptzLogOffset;
+            using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: true);
+            string appended = reader.ReadToEnd();
+            ptzLogOffset = stream.Length;
+            string text = ptzLogRemainder + appended;
+            string[] lines = text.Split('\n');
+            ptzLogRemainder = text.EndsWith('\n') ? string.Empty : lines[^1];
+            int completeLines = text.EndsWith('\n') ? lines.Length : lines.Length - 1;
+            for (int index = 0; index < completeLines; index++)
+            {
+                string json = lines[index].Trim();
+                if (!json.StartsWith('{') || !json.Contains("\"Ret\":100", StringComparison.Ordinal))
+                    continue;
+                if (json.Contains("\"Name\":\"SystemFunction\"", StringComparison.Ordinal))
+                    ptzSystemResponses.Enqueue(json);
+                else if (json.Contains("\"Name\":\"Uart.PTZControlCmd\"", StringComparison.Ordinal))
+                    ptzOrientationResponses.Enqueue(json);
+            }
+        }
+        catch
+        {
+            // O SDK pode girar o arquivo durante a leitura; a proxima tentativa continua.
+        }
+    }
+
+    private List<(int DeviceId, int Command, string Json)> CollectPtzLogAssignments()
+    {
+        var assignments = new List<(int, int, string)>();
+        lock (ptzLogLock)
+        {
+            ReadNewPtzResponsesLocked();
+            while (pendingPtzSystemDevices.Count > 0 && ptzSystemResponses.Count > 0)
+                assignments.Add((pendingPtzSystemDevices.Dequeue(), SystemFunctionCommand,
+                    ptzSystemResponses.Dequeue()));
+            while (pendingPtzOrientationDevices.Count > 0 && ptzOrientationResponses.Count > 0)
+                assignments.Add((pendingPtzOrientationDevices.Dequeue(), PtzControlConfigCommand,
+                    ptzOrientationResponses.Dequeue()));
+        }
+        return assignments;
+    }
+
+    private void ProcessPtzLogAssignments()
+    {
+        foreach ((int targetDeviceId, int command, string json) in CollectPtzLogAssignments())
+            ApplyPtzConfigJson(targetDeviceId, command, json);
+    }
+
+    private async Task RetryPtzLogAssignmentsAsync()
+    {
+        for (int attempt = 0; attempt < 20 && !isClosing; attempt++)
+        {
+            await Task.Delay(75).ConfigureAwait(false);
+            ProcessPtzLogAssignments();
+            lock (ptzLogLock)
+                if (pendingPtzSystemDevices.Count == 0 && pendingPtzOrientationDevices.Count == 0)
+                    return;
+        }
+    }
+
+    private void RequestPtzConfig(int targetDeviceId, int command, string request)
+    {
+        var key = (targetDeviceId, command);
+        if (pendingPtzConfigBuffers.ContainsKey(key))
+            return;
+        IntPtr buffer = Marshal.AllocHGlobal(DeviceConfigBufferSize);
+        byte[] empty = new byte[DeviceConfigBufferSize];
+        Marshal.Copy(empty, 0, buffer, empty.Length);
+        byte[] encoded = Encoding.UTF8.GetBytes(request);
+        Marshal.Copy(encoded, 0, buffer, Math.Min(encoded.Length, DeviceConfigBufferSize - 1));
+        if (!pendingPtzConfigBuffers.TryAdd(key, buffer))
+        {
+            Marshal.FreeHGlobal(buffer);
             return;
         }
-        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, value, 0);
+        try
+        {
+            int result = CmsSdk.CMS_Client_GetDeviceConfig(
+                targetDeviceId, -1, command, buffer, DeviceConfigBufferSize, -1);
+            if (result < 0 && pendingPtzConfigBuffers.TryRemove(key, out IntPtr rejected))
+                Marshal.FreeHGlobal(rejected);
+        }
+        catch
+        {
+            if (pendingPtzConfigBuffers.TryRemove(key, out IntPtr rejected))
+                Marshal.FreeHGlobal(rejected);
+        }
+    }
+
+    private static string ReadNativeJson(IntPtr pointer, int maximumBytes)
+    {
+        if (pointer == IntPtr.Zero)
+            return string.Empty;
+        try
+        {
+            int length = 0;
+            int limit = Math.Clamp(maximumBytes, 1, DeviceConfigBufferSize);
+            while (length < limit && Marshal.ReadByte(pointer, length) != 0)
+                length++;
+            if (length == 0)
+                return string.Empty;
+            byte[] bytes = new byte[length];
+            Marshal.Copy(pointer, bytes, 0, length);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch { return string.Empty; }
+    }
+
+    private static bool TryFindBoolean(JsonElement element, string propertyName, out bool value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty property in element.EnumerateObject())
+            {
+                if (property.NameEquals(propertyName))
+                {
+                    if (property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        value = property.Value.GetBoolean();
+                        return true;
+                    }
+                    if (property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt32(out int number))
+                    {
+                        value = number != 0;
+                        return true;
+                    }
+                }
+                if (TryFindBoolean(property.Value, propertyName, out value))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in element.EnumerateArray())
+                if (TryFindBoolean(item, propertyName, out value))
+                    return true;
+        }
+        value = false;
+        return false;
+    }
+
+    private void HandlePtzConfigResponse(
+        int targetDeviceId, int command, IntPtr text1, IntPtr text2, uint size)
+    {
+        var key = (targetDeviceId, command);
+        pendingPtzConfigBuffers.TryRemove(key, out IntPtr requestBuffer);
+        // text1/text2 não são ponteiros de texto estáveis nesta build do CMS.
+        // O VMS fornece o buffer de entrada/saída; lemos somente essa memória nossa.
+        string json = string.Empty;
+        if (requestBuffer != IntPtr.Zero)
+            Marshal.FreeHGlobal(requestBuffer);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            lock (ptzLogLock)
+            {
+                if (command == SystemFunctionCommand)
+                    pendingPtzSystemDevices.Enqueue(targetDeviceId);
+                else
+                    pendingPtzOrientationDevices.Enqueue(targetDeviceId);
+            }
+            ProcessPtzLogAssignments();
+            _ = RetryPtzLogAssignmentsAsync();
+            return;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            PtzCapabilityState state = ptzCapabilities.GetOrAdd(targetDeviceId, _ => new PtzCapabilityState());
+            lock (state)
+            {
+                if (command == SystemFunctionCommand &&
+                    TryFindBoolean(document.RootElement, "SupportPTZDirectionControl", out bool supported))
+                {
+                    state.DeviceSupportsPtz = supported;
+                }
+                else if (command == PtzControlConfigCommand &&
+                    document.RootElement.TryGetProperty("Uart.PTZControlCmd", out JsonElement channels) &&
+                    channels.ValueKind == JsonValueKind.Array)
+                {
+                    state.Channels.Clear();
+                    int channel = 0;
+                    foreach (JsonElement item in channels.EnumerateArray())
+                    {
+                        TryFindBoolean(item, "MirrorOperation", out bool mirror);
+                        TryFindBoolean(item, "FlipOperation", out bool flip);
+                        state.Channels[channel++] = (mirror, flip);
+                    }
+                }
+            }
+            Dispatcher.BeginInvoke((Action)(() => ApplyPtzCapability(targetDeviceId)));
+        }
+        catch
+        {
+            // Nunca registra o JSON nativo: ele pode conter metadados do dispositivo.
+        }
+    }
+
+    private void ApplyPtzConfigJson(int targetDeviceId, int command, string json)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            PtzCapabilityState state = ptzCapabilities.GetOrAdd(targetDeviceId, _ => new PtzCapabilityState());
+            lock (state)
+            {
+                if (command == SystemFunctionCommand &&
+                    TryFindBoolean(document.RootElement, "SupportPTZDirectionControl", out bool supported))
+                {
+                    state.DeviceSupportsPtz = supported;
+                }
+                else if (command == PtzControlConfigCommand &&
+                    document.RootElement.TryGetProperty("Uart.PTZControlCmd", out JsonElement channels) &&
+                    channels.ValueKind == JsonValueKind.Array)
+                {
+                    state.Channels.Clear();
+                    int channel = 0;
+                    foreach (JsonElement item in channels.EnumerateArray())
+                    {
+                        TryFindBoolean(item, "MirrorOperation", out bool mirror);
+                        TryFindBoolean(item, "FlipOperation", out bool flip);
+                        state.Channels[channel++] = (mirror, flip);
+                    }
+                }
+            }
+            Dispatcher.BeginInvoke((Action)(() => ApplyPtzCapability(targetDeviceId)));
+        }
+        catch
+        {
+            // Nao registra a resposta nativa: ela pode conter metadados do dispositivo.
+        }
+    }
+
+    private void ApplyPtzCapability(int targetDeviceId)
+    {
+        if (!ptzCapabilities.TryGetValue(targetDeviceId, out PtzCapabilityState? state))
+            return;
+        bool? supported;
+        Dictionary<int, (bool Mirror, bool Flip)> channels;
+        lock (state)
+        {
+            supported = state.DeviceSupportsPtz;
+            channels = new Dictionary<int, (bool Mirror, bool Flip)>(state.Channels);
+        }
+        if (supported is null || channels.Count == 0)
+            return;
+
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            item.CmsDeviceId == targetDeviceId || previewBindings.Values.Any(binding =>
+                binding.DeviceId == targetDeviceId && string.Equals(binding.CloudId, item.CloudId, StringComparison.Ordinal)));
+        if (device is null)
+            return;
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        entry.PtzSupportedChannels.Clear();
+        entry.PtzMirrorChannels.Clear();
+        entry.PtzFlipChannels.Clear();
+        foreach ((int channel, var orientation) in channels)
+        {
+            entry.PtzSupportedChannels[channel] = supported == true;
+            entry.PtzMirrorChannels[channel] = orientation.Mirror;
+            entry.PtzFlipChannels[channel] = orientation.Flip;
+        }
+        SaveCameraCatalog();
+        int supportedChannels = entry.PtzSupportedChannels.Count(item => item.Value);
+        Log($"Capacidade PTZ confirmada: dispositivo {targetDeviceId}; canais suportados {supportedChannels}; orientação aplicada.");
+        if (selectedPreviewWindow >= 0 && previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
+            SelectPreviewWindow(selected.Window);
+    }
+
+    private void SendPtzOneShot(int command, int value, string description)
+    {
+        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow) ||
+            !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding) ||
+            !SupportsPtz(binding))
+        {
+            SelectedCameraText.Text = "PTZ indisponível neste canal";
+            return;
+        }
+        // VMS Pro keeps the configured PTZ speed in the third argument and
+        // sends the preset number in the fourth argument for commands 17-19.
+        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, 5, value);
         SelectedCameraText.Text = result > 0
             ? $"Comando enviado: {description} {value}"
             : $"A câmera não confirmou: {description}";
@@ -1375,14 +2012,17 @@ public partial class MainWindow : Window
 
     private void SendPtzCommand(int command, bool stop)
     {
-        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow))
+        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow) ||
+            !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding) ||
+            !SupportsPtz(binding))
             return;
-        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, 5, stop ? 1 : 0);
+        int nativeCommand = stop ? command : MapPtzDirection(binding, command);
+        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, nativeCommand, 5, stop ? 1 : 0);
         if (!stop)
-            activePtzCommand = command;
+            activePtzCommand = nativeCommand;
         if (result <= 0)
             SelectedCameraText.Text = "Este canal não confirmou suporte ao comando PTZ";
-        Log($"PTZ: janela {selectedPreviewWindow}; comando {command}; {(stop ? "parar" : "iniciar")}; retorno {result}.");
+        Log($"PTZ: janela {selectedPreviewWindow}; comando visual {command}; comando orientado {nativeCommand}; {(stop ? "parar" : "iniciar")}; retorno {result}.");
     }
 
     private void StopPtzCommand()
@@ -1395,22 +2035,26 @@ public partial class MainWindow : Window
         catch { }
     }
 
-    private CameraCatalogStore.Entry? SelectedCatalogEntry()
+    private CloudApi.AccountDevice? SelectedSmartDevice()
     {
+        if (CamerasView.Visibility == Visibility.Visible &&
+            DeviceBox.SelectedItem is CloudApi.AccountDevice selectedDevice)
+            return selectedDevice;
         if (selectedPreviewWindow < 0 ||
             !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding))
             return null;
-        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+        return accountDevices.FirstOrDefault(item =>
             string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+    }
+
+    private CameraCatalogStore.Entry? SelectedCatalogEntry()
+    {
+        CloudApi.AccountDevice? device = SelectedSmartDevice();
         return device is null ? null : cameraCatalog.GetOrCreate(device, int.MaxValue);
     }
 
-    private void LoadSmartControls(PreviewBinding binding)
+    private void LoadSmartControls(CloudApi.AccountDevice device)
     {
-        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
-            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
-        if (device is null)
-            return;
         CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
         MotionTrackingBox.IsChecked = entry.MotionTracking;
         MotionSensitivitySlider.Value = Math.Clamp(entry.MotionSensitivity, 1, 6);
@@ -1431,13 +2075,21 @@ public partial class MainWindow : Window
         SmartControlStatusText.Text = "Configuração local carregada. O envio só é habilitado quando o modelo confirma suporte.";
     }
 
+    private void LoadSmartControls(PreviewBinding binding)
+    {
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+        if (device is not null)
+            LoadSmartControls(device);
+    }
+
     private void ApplySmartControls_Click(object sender, RoutedEventArgs e)
     {
         CameraCatalogStore.Entry? entry = SelectedCatalogEntry();
-        if (entry is null || selectedPreviewWindow < 0 ||
-            !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding))
+        CloudApi.AccountDevice? device = SelectedSmartDevice();
+        if (entry is null || device is null)
         {
-            SmartControlStatusText.Text = "Selecione uma câmera online.";
+            SmartControlStatusText.Text = "Selecione uma câmera.";
             return;
         }
         entry.MotionTracking = MotionTrackingBox.IsChecked == true;
@@ -1459,8 +2111,10 @@ public partial class MainWindow : Window
         // intenção por câmera, mas jamais exibimos um falso "aplicado".
         SmartControlStatusText.Text =
             "Preferências salvas neste computador. Este firmware ainda não confirmou a interface de configuração remota.";
-        SelectedCameraText.Text = $"{binding.DisplayName}: recursos inteligentes salvos; envio não confirmado pelo firmware";
-        Log($"Controles inteligentes salvos localmente: dispositivo {binding.DeviceId}; envio remoto indisponível na ABI atual.");
+        CameraSaveStatusText.Text = "Preferências inteligentes salvas localmente.";
+        if (CamerasView.Visibility != Visibility.Visible)
+            SelectedCameraText.Text = $"{device.Alias}: recursos inteligentes salvos; envio não confirmado pelo firmware";
+        Log($"Controles inteligentes salvos localmente para {device.Alias}; envio remoto indisponível na ABI atual.");
     }
 
     private void OpenSeparateWindow_Click(object sender, RoutedEventArgs e)
@@ -1518,6 +2172,12 @@ public partial class MainWindow : Window
         {
             try
             {
+                if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
+                {
+                    floating.Title += " — bloqueada temporariamente";
+                    Log($"Janela separada suprimida: {DeviceBlockStatus(binding.DeviceId)}.");
+                    return;
+                }
                 int create = CmsSdk.CMS_Client_CreatePlayWindow(
                     nativeWindow, unchecked((int)hostPanel.Handle.ToInt64()), 0);
                 int preview = CmsSdk.CMS_Client_StartPreview(
@@ -2382,7 +3042,77 @@ public partial class MainWindow : Window
         await OpenGridAsync(slots);
     }
 
-    private async Task OpenGridAsync(int slots)
+    private Task OpenGridAsync(int slots)
+    {
+        if (slots is not (1 or 4 or 9 or 16) || accountDevices.Count == 0)
+            return Task.CompletedTask;
+
+        lock (gridLayoutQueueSync)
+        {
+            queuedGridLayoutSlots = slots;
+            UpdateLayoutButtonSelection(slots);
+            if (gridLayoutWorkerRunning)
+            {
+                Log($"Troca para grade {slots} enfileirada; a montagem atual sera concluida antes de reconstruir as janelas.");
+                return gridLayoutWorker;
+            }
+
+            gridLayoutWorkerRunning = true;
+            gridLayoutWorker = ProcessQueuedGridLayoutsAsync();
+            return gridLayoutWorker;
+        }
+    }
+
+    private async Task WaitForCmsMonitorBeforeAutoPlayAsync(TimeSpan timeout)
+    {
+        var registeredDeviceIds = new HashSet<int>();
+        foreach (CloudApi.AccountDevice device in accountDevices.Where(device => !device.Paused))
+        {
+            var info = new CmsSdk.DeviceInfo();
+            if (GetCmsDeviceInfo(device.CloudId, ref info) != 0 && info.ID > 0)
+                registeredDeviceIds.Add(info.ID);
+        }
+        if (registeredDeviceIds.Count == 0)
+            return;
+
+        Log($"Aguardando passivamente o monitor do CMS antes da grade automatica; " +
+            $"limite {Math.Ceiling(timeout.TotalSeconds)}s; nenhuma requisicao individual sera enviada.");
+        Stopwatch timer = Stopwatch.StartNew();
+        while (!isClosing && timer.Elapsed < timeout)
+        {
+            qtRuntime.ProcessEvents();
+            int answered = registeredDeviceIds.Count(automaticDeviceLoginResults.ContainsKey);
+            if (answered == registeredDeviceIds.Count)
+                break;
+            await Task.Delay(200);
+        }
+        int responses = registeredDeviceIds.Count(automaticDeviceLoginResults.ContainsKey);
+        Log($"Monitor do CMS estabilizado para a grade: respostas {responses}/{registeredDeviceIds.Count}; " +
+            $"espera {Math.Ceiling(timer.Elapsed.TotalSeconds)}s.");
+    }
+
+    private async Task ProcessQueuedGridLayoutsAsync()
+    {
+        await Task.Yield();
+        while (true)
+        {
+            int slots;
+            lock (gridLayoutQueueSync)
+            {
+                if (queuedGridLayoutSlots is not int requested)
+                {
+                    gridLayoutWorkerRunning = false;
+                    return;
+                }
+                slots = requested;
+                queuedGridLayoutSlots = null;
+            }
+
+            await OpenGridCoreAsync(slots);
+        }
+    }
+
+    private async Task OpenGridCoreAsync(int slots)
     {
         if (slots is not (1 or 4 or 9 or 16) || accountDevices.Count == 0)
             return;
@@ -2424,13 +3154,29 @@ public partial class MainWindow : Window
                     if (!accountDevices[index].ShowInLiveView)
                         continue;
                     CameraCatalogStore.Entry catalogEntry = cameraCatalog.GetOrCreate(accountDevices[index], index);
+                    if (catalogEntry.Paused || accountDevices[index].Paused)
+                    {
+                        accountDevices[index].RuntimeStatus = "Pausada";
+                        continue;
+                    }
                     if (catalogEntry.IsManual && string.IsNullOrWhiteSpace(accountDevices[index].DevicePassword))
                     {
                         accountDevices[index].RuntimeStatus = "Credenciais necessárias";
                         continue;
                     }
-                    requests.Add((accountDevices[index], 0));
-                    requests.Add((accountDevices[index], 1));
+                    // O VMS Pro abre apenas canais conhecidos/selecionados; ele
+                    // nao testa todos os canais novamente a cada troca de grade.
+                    // Para um dispositivo novo, teste somente o canal principal.
+                    int configuredCount = catalogEntry.ChannelCountOverride is 1 or 2
+                        ? catalogEntry.ChannelCountOverride.Value
+                        : catalogEntry.DetectedChannelCount is 1 or 2
+                            ? catalogEntry.DetectedChannelCount.Value
+                            : 2;
+                    // Sem capacidade detectada, valida o principal e sonda o
+                    // secundario uma unica vez. O loop impede que o secundario
+                    // seja testado antes de o principal confirmar imagem.
+                    foreach (int channel in Enumerable.Range(0, configuredCount))
+                        requests.Add((accountDevices[index], channel));
                 }
                 requests = OrderLiveRequests(requests);
             }
@@ -2442,7 +3188,6 @@ public partial class MainWindow : Window
             int destinationWindow = 0;
             var pending = new List<(CloudApi.AccountDevice Device, int Channel)>(requests);
             var rejectionLogged = new HashSet<string>(StringComparer.Ordinal);
-            var retryAfter = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
             var transientFailures = new Dictionary<string,
                 (CloudApi.AccountDevice Device, int Channel, int DeviceId)>(StringComparer.Ordinal);
             var openedKeys = new HashSet<string>(StringComparer.Ordinal);
@@ -2457,9 +3202,25 @@ public partial class MainWindow : Window
                 foreach ((CloudApi.AccountDevice device, int channel) in pending.ToArray())
                 {
                     string candidateKey = device.CloudId + ":" + channel;
-                    if (retryAfter.TryGetValue(candidateKey, out TimeSpan nextAttempt) &&
-                        loginTimer.Elapsed < nextAttempt)
+                    CameraCatalogStore.Entry candidateCatalog = cameraCatalog.GetOrCreate(device, int.MaxValue);
+                    if (channel > 0 &&
+                        candidateCatalog.ChannelCountOverride is not (1 or 2) &&
+                        candidateCatalog.DetectedChannelCount is null &&
+                        !openedKeys.Contains(PreviewOrderKey(device.CloudId, 0)))
+                    {
+                        // O canal principal ainda nao foi validado. Se ele ainda
+                        // esta na fila, aguarda a proxima passagem sem enviar
+                        // pedido. Se ja foi recusado, descarta tambem a sonda do
+                        // secundario para nao esperar ate o timeout da grade.
+                        if (pending.Any(item =>
+                                string.Equals(item.Device.CloudId, device.CloudId, StringComparison.Ordinal) &&
+                                item.Channel == 0))
+                            continue;
+                        pending.Remove((device, channel));
+                        rejected++;
+                        progressed = true;
                         continue;
+                    }
                     var info = new CmsSdk.DeviceInfo();
                     int found = GetCmsDeviceInfo(device.CloudId, ref info);
                     int state = info.Error;
@@ -2473,12 +3234,36 @@ public partial class MainWindow : Window
                         progressed = true;
                         continue;
                     }
-                    bool previewMayCompleteLogin = state == -25 &&
-                        loginTimer.Elapsed >= TimeSpan.FromSeconds(5);
-                    if (info.LoginHandle <= 0 && state <= 0 && !previewMayCompleteLogin)
+                    TrackDeviceRequestProtection(device, info.ID);
+                    if (state == -27 || IsDeviceCooldownBlocked(info.ID))
                     {
+                        RecordDeviceRequestResult(info.ID, -27);
+                        pending.Remove((device, channel));
+                        rejected++;
+                        progressed = true;
+                        if (rejectionLogged.Add(device.CloudId))
+                            Log($"Grade: {device.Alias}; {DeviceBlockStatus(info.ID)}; nenhuma requisicao sera enviada durante a quarentena.");
+                        continue;
+                    }
+                    if (info.LoginHandle <= 0 && state <= 0)
+                    {
+                        // Igual ao VMS Pro: StartCheckDevLink e o monitor interno
+                        // possuem o estado de login. A grade nunca chama
+                        // DeviceLoginOrLogout automaticamente. Enquanto a resposta
+                        // ainda nao chegou, aguarda uma janela curta compartilhada
+                        // pela montagem inteira, sem multiplicar por canal.
+                        if (state == 0 && loginTimer.Elapsed < TimeSpan.FromSeconds(15))
+                        {
+                            continue;
+                        }
+                        pending.Remove((device, channel));
+                        rejected++;
+                        progressed = true;
                         if (state < 0 && rejectionLogged.Add(device.CloudId))
                             Log($"Grade: {device.Alias}; login provisoriamente recusado ({state}); cadastro preservado.");
+                        else if (rejectionLogged.Add(device.CloudId))
+                            Log($"Grade: {device.Alias}; monitor do CMS ainda sem confirmacao; " +
+                                "nenhum login individual foi enviado.");
                         continue;
                     }
 
@@ -2500,6 +3285,8 @@ public partial class MainWindow : Window
                         transientFailures.Remove(candidateKey);
                         openedKeys.Add(candidateKey);
                         channelKnowledgeChanged |= cameraCatalog.MarkChannelAvailable(device, channel);
+                        if (channel > 0 && candidateCatalog.ChannelCountOverride is not (1 or 2))
+                            channelKnowledgeChanged |= cameraCatalog.SetDetectedChannelCount(device, 2);
                         opened++;
                         destinationWindow++;
                     }
@@ -2507,17 +3294,21 @@ public partial class MainWindow : Window
                     {
                         videoLabels[destinationWindow].Visible = false;
                         videoLabels[destinationWindow].Text = string.Empty;
-                        if (previewMayCompleteLogin &&
-                            loginTimer.Elapsed < TimeSpan.FromSeconds(connectionTimeoutSeconds - 5))
+                        bool rejectedSecondary = channel > 0 &&
+                            openedKeys.Contains(PreviewOrderKey(device.CloudId, 0));
+                        if (rejectedSecondary && candidateCatalog.ChannelCountOverride is not (1 or 2))
                         {
-                            transientFailures[candidateKey] = (device, channel, info.ID);
-                            pending.Add((device, channel));
-                            retryAfter[candidateKey] = loginTimer.Elapsed + TimeSpan.FromSeconds(5);
-                            Log($"Grade: {device.Alias}; canal {channel + 1}; " +
-                                "preview ainda nao confirmou; nova tentativa sera feita.");
+                            channelKnowledgeChanged |= cameraCatalog.SetDetectedChannelCount(device, 1);
+                            Log($"Grade: {device.Alias}; capacidade detectada automaticamente: 1 canal; " +
+                                "o secundario nao ocupara quadro offline.");
                         }
                         else
-                            rejected++;
+                        {
+                            transientFailures[candidateKey] = (device, channel, info.ID);
+                        }
+                        rejected++;
+                        Log($"Grade: {device.Alias}; canal {channel + 1}; " +
+                            "preview nao confirmou; nenhuma repeticao foi enviada neste ciclo.");
                     }
                     progressed = true;
                     if (destinationWindow >= slots)
@@ -2547,6 +3338,7 @@ public partial class MainWindow : Window
                     : GetCmsDeviceId(device.CloudId);
                 if (pendingDeviceId <= 0)
                     continue;
+                TrackDeviceRequestProtection(device, pendingDeviceId);
                 SetVideoLabel(destinationWindow, device, channel);
                 bool reconnectSd = cameraCatalog.GetOrCreate(device, int.MaxValue).PreferredSd
                     ?? (SubstreamBox.IsChecked == true);
@@ -2559,10 +3351,19 @@ public partial class MainWindow : Window
                     device.CloudId,
                     Volatile.Read(ref previewGeneration));
                 previewBindings[destinationWindow] = binding;
-                SetPreviewStatus(binding, "Reconectando", System.Drawing.Color.Orange);
-                _ = RecoverPreviewAsync(binding);
+                bool cooldownBlocked = IsDeviceCooldownBlocked(pendingDeviceId);
+                bool automaticRecovery = preferences.AutoReconnect && !cooldownBlocked;
+                SetPreviewStatus(
+                    binding,
+                    cooldownBlocked ? DeviceBlockStatus(pendingDeviceId) :
+                    automaticRecovery ? "Reconectando" : "Offline",
+                    automaticRecovery ? System.Drawing.Color.Orange : System.Drawing.Color.IndianRed);
+                if (automaticRecovery)
+                    _ = RecoverPreviewAsync(binding);
                 Log($"Grade: {device.Alias}; canal {channel + 1}; quadro {destinationWindow + 1}; " +
-                    "vaga preservada para reconexao automatica.");
+                    (automaticRecovery
+                        ? "vaga preservada para reconexao automatica protegida."
+                        : "vaga preservada sem nova requisicao automatica."));
                 destinationWindow++;
                 reconnecting++;
             }
@@ -2672,9 +3473,12 @@ public partial class MainWindow : Window
     private static string PreviewOrderKey(string cloudId, int channel) => $"{cloudId}:{channel}";
 
     private bool IsKnownLiveChannel(CloudApi.AccountDevice device, int channel) =>
-        cameraCatalog.IsKnownChannel(device, channel) ||
-        preferences.LiveLayoutOrder.Contains(
-            PreviewOrderKey(device.CloudId, channel), StringComparer.Ordinal);
+        // A ordem visual tambem guarda candidatos que foram testados e nunca
+        // exibiram imagem. Ela nao pode ser usada como prova de que um canal
+        // existe, pois cameras quebradas acabariam ocupando vagas eternamente.
+        // Somente MarkChannelAvailable, apos callback de imagem confirmado,
+        // inclui o canal no catalogo de fluxos recuperaveis.
+        cameraCatalog.IsKnownChannel(device, channel);
 
     private static int GetCmsDeviceInfo(string identifier, ref CmsSdk.DeviceInfo info)
     {
@@ -2690,10 +3494,181 @@ public partial class MainWindow : Window
         return found != 0 ? info.ID : 0;
     }
 
+    private void TrackDeviceRequestProtection(CloudApi.AccountDevice device, int cmsDeviceId)
+    {
+        if (cmsDeviceId <= 0)
+            return;
+        deviceCloudIds[cmsDeviceId] = device.CloudId;
+        device.CmsDeviceId = cmsDeviceId;
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        if (deviceRequestProtections.TryGetValue(cmsDeviceId, out DeviceRequestProtection? active))
+        {
+            DateTime activeUntil;
+            int activeError;
+            lock (active.Sync)
+            {
+                activeUntil = active.NextAllowedUtc;
+                activeError = active.LastError;
+            }
+            if (activeError == -27 && activeUntil > DateTime.UtcNow)
+            {
+                if (entry.LastRequestError != -27 ||
+                    entry.RequestBlockedUntilUtc is not DateTime savedUntil ||
+                    savedUntil.ToUniversalTime() < activeUntil)
+                {
+                    entry.LastRequestError = -27;
+                    entry.RequestBlockedUntilUtc = activeUntil;
+                    SaveCameraCatalog();
+                }
+                return;
+            }
+        }
+        if (entry.LastRequestError != -27 || entry.RequestBlockedUntilUtc is not DateTime blockedUntil)
+            return;
+
+        DateTime blockedUntilUtc = blockedUntil.ToUniversalTime();
+        if (blockedUntilUtc <= DateTime.UtcNow)
+        {
+            entry.LastRequestError = 0;
+            entry.RequestBlockedUntilUtc = null;
+            SaveCameraCatalog();
+            return;
+        }
+
+        DeviceRequestProtection protection = deviceRequestProtections.GetOrAdd(
+            cmsDeviceId, _ => new DeviceRequestProtection());
+        lock (protection.Sync)
+        {
+            protection.LastError = -27;
+            protection.NextAllowedUtc = blockedUntilUtc;
+        }
+    }
+
+    private void PersistDeviceBlock(int device, DateTime blockedUntilUtc)
+    {
+        if (!deviceCloudIds.TryGetValue(device, out string? cloudId))
+            return;
+        Dispatcher.BeginInvoke((Action)(() =>
+        {
+            CloudApi.AccountDevice? accountDevice = accountDevices.FirstOrDefault(item =>
+                string.Equals(item.CloudId, cloudId, StringComparison.Ordinal));
+            if (accountDevice is null)
+                return;
+            CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(accountDevice, int.MaxValue);
+            if (entry.LastRequestError == -27 &&
+                entry.RequestBlockedUntilUtc is DateTime existing &&
+                existing.ToUniversalTime() >= blockedUntilUtc)
+                return;
+            entry.LastRequestError = -27;
+            entry.RequestBlockedUntilUtc = blockedUntilUtc;
+            SaveCameraCatalog();
+        }));
+    }
+
+    private void RecordDeviceRequestResult(int device, int result)
+    {
+        if (device <= 0 || result == 0)
+            return;
+
+        DeviceRequestProtection protection = deviceRequestProtections.GetOrAdd(
+            device, _ => new DeviceRequestProtection());
+        lock (protection.Sync)
+        {
+            if (result > 0)
+            {
+                // Um callback positivo passivo nao cancela a quarentena. O
+                // primeiro pedido do app so pode ocorrer apos a hora completa.
+                if (protection.LastError == -27 && protection.NextAllowedUtc > DateTime.UtcNow)
+                    return;
+                protection.ConsecutiveFailures = 0;
+                protection.LastError = 0;
+                protection.LastFailureUtc = default;
+                protection.NextAllowedUtc = default;
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if (result == -27 && protection.LastError == -27 && protection.NextAllowedUtc > now)
+            {
+                // O monitor CMS repete -27 passivamente. Nao prolongar a hora a
+                // cada callback, senao o dispositivo jamais sairia da quarentena.
+                return;
+            }
+            // The native monitor can repeat the same callback while processing
+            // one request. Count it once, otherwise a single request would look
+            // like a burst produced by the application.
+            if (protection.LastError == result &&
+                now - protection.LastFailureUtc < TimeSpan.FromSeconds(15))
+                return;
+
+            protection.LastError = result;
+            protection.LastFailureUtc = now;
+            protection.ConsecutiveFailures++;
+            if (result == -27)
+            {
+                protection.NextAllowedUtc = now + DeviceBlockCooldown;
+                PersistDeviceBlock(device, protection.NextAllowedUtc);
+                return;
+            }
+
+            int exponent = Math.Min(4, Math.Max(0, protection.ConsecutiveFailures - 1));
+            int minutes = Math.Min(15, 1 << exponent);
+            if (result == -8)
+                minutes = Math.Max(minutes, 10);
+            protection.NextAllowedUtc = now + TimeSpan.FromMinutes(minutes);
+        }
+    }
+
+    private bool CanIssueDeviceRequest(
+        int device, out TimeSpan wait, out bool blockedByDevice, out int lastError)
+    {
+        wait = TimeSpan.Zero;
+        blockedByDevice = false;
+        lastError = 0;
+        if (device <= 0 || !deviceRequestProtections.TryGetValue(device, out DeviceRequestProtection? protection))
+            return true;
+
+        lock (protection.Sync)
+        {
+            lastError = protection.LastError;
+            wait = protection.NextAllowedUtc > DateTime.UtcNow
+                ? protection.NextAllowedUtc - DateTime.UtcNow
+                : TimeSpan.Zero;
+            blockedByDevice = lastError == -27 && wait > TimeSpan.Zero;
+            return wait <= TimeSpan.Zero;
+        }
+    }
+
+    private bool IsDeviceCooldownBlocked(int device) =>
+        !CanIssueDeviceRequest(device, out _, out bool blockedByDevice, out _) && blockedByDevice;
+
+    private string DeviceBlockStatus(int device)
+    {
+        if (!CanIssueDeviceRequest(device, out TimeSpan wait, out bool blockedByDevice, out _) &&
+            blockedByDevice)
+            return $"Bloqueada - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
+        return "Offline";
+    }
+
+    private TimeSpan GetProtectedRetryDelay(int device)
+    {
+        TimeSpan configuredMinimum = TimeSpan.FromSeconds(
+            Math.Max(60, preferences.ReconnectDelaySeconds));
+        if (CanIssueDeviceRequest(device, out TimeSpan wait, out _, out _))
+            return configuredMinimum;
+        return wait < configuredMinimum ? configuredMinimum : wait;
+    }
+
     private async Task<bool> TryOpenConfirmedPreviewAsync(
         int selectedDeviceId, int window, int channel,
         CmsSdk.StreamType streamType, string displayName, string cloudId, TimeSpan timeout)
     {
+        if (!CanIssueDeviceRequest(selectedDeviceId, out TimeSpan wait, out _, out int lastError))
+        {
+            Log($"Abertura suprimida: dispositivo {selectedDeviceId}; erro {lastError}; " +
+                $"quarentena restante {Math.Ceiling(wait.TotalMinutes)} min.");
+            return false;
+        }
         confirmedPreviewWindows.TryRemove(window, out _);
         failedPreviewWindows.TryRemove(window, out _);
         previewBindings[window] = new PreviewBinding(
@@ -2739,11 +3714,13 @@ public partial class MainWindow : Window
             .Where(binding => binding.DeviceId == recoveredDeviceId)
             .OrderBy(binding => binding.Window)
             .ToArray();
-        await Task.WhenAll(bindings.Select(binding => RecoverPreviewAsync(binding, forceOneAttempt)));
+        foreach (PreviewBinding binding in bindings)
+            await RecoverPreviewAsync(binding, forceOneAttempt);
     }
 
     private async Task RecoverPreviewAsync(PreviewBinding binding, bool forceOneAttempt = false)
     {
+        const int maximumAutomaticAttempts = 3;
         int attempt = 0;
         if (!recoveringPreviewWindows.TryAdd(binding.Window, 0))
             return;
@@ -2753,6 +3730,7 @@ public partial class MainWindow : Window
                    binding.Generation == Volatile.Read(ref previewGeneration) &&
                    previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) &&
                    current == binding &&
+                   attempt < maximumAutomaticAttempts &&
                    (preferences.AutoReconnect || forceOneAttempt && attempt == 0))
             {
                 attempt++;
@@ -2762,7 +3740,26 @@ public partial class MainWindow : Window
                     binding,
                     $"Reconectando {attempt} • {DateTime.Now:HH:mm:ss}",
                     System.Drawing.Color.Orange);
-                await EnsureDeviceLoginForRecoveryAsync(binding, attempt);
+                bool loginReady = await EnsureDeviceLoginForRecoveryAsync(binding, attempt);
+                if (!loginReady)
+                {
+                    TimeSpan waitingDelay = GetProtectedRetryDelay(binding.DeviceId);
+                    if (IsDeviceCooldownBlocked(binding.DeviceId))
+                    {
+                        SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                        Log($"Reconexao suspensa por uma hora: dispositivo {binding.DeviceId}; nenhuma requisicao enviada.");
+                        return;
+                    }
+                    Log($"Reconexao aguardando o monitor automatico do CMS; nova verificacao em " +
+                        $"{Math.Ceiling(waitingDelay.TotalSeconds)}s: dispositivo {binding.DeviceId}; canal {binding.Channel}.");
+                    await Task.Delay(waitingDelay);
+                    continue;
+                }
+                if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
+                {
+                    SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    return;
+                }
                 int result = CmsSdk.CMS_Client_StartPreview(
                     binding.DeviceId, binding.Window, binding.Channel, binding.StreamType, false);
                 Log($"Recuperacao do preview: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
@@ -2792,10 +3789,25 @@ public partial class MainWindow : Window
                         await Task.Delay(100);
                     }
                 }
-                int retryDelay = Math.Max(1000, preferences.ReconnectDelaySeconds * 1000);
-                Log($"Preview ainda sem imagem; nova tentativa automatica em {retryDelay / 1000}s: " +
-                    $"dispositivo {binding.DeviceId}; canal {binding.Channel}.");
+                TimeSpan retryDelay = GetProtectedRetryDelay(binding.DeviceId);
+                if (IsDeviceCooldownBlocked(binding.DeviceId))
+                {
+                    SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    return;
+                }
+                Log($"Preview ainda sem imagem; nova tentativa automatica em " +
+                    $"{Math.Ceiling(retryDelay.TotalSeconds)}s: dispositivo {binding.DeviceId}; canal {binding.Channel}.");
                 await Task.Delay(retryDelay);
+            }
+
+            if (preferences.AutoReconnect && attempt >= maximumAutomaticAttempts &&
+                binding.Generation == Volatile.Read(ref previewGeneration) &&
+                previewBindings.TryGetValue(binding.Window, out PreviewBinding? active) &&
+                active == binding)
+            {
+                SetPreviewStatus(binding, "Offline - reconexao manual", System.Drawing.Color.IndianRed);
+                Log($"Reconexao automatica encerrada apos {maximumAutomaticAttempts} tentativas: " +
+                    $"dispositivo {binding.DeviceId}; canal {binding.Channel}. Nenhuma nova requisicao sera enviada automaticamente.");
             }
         }
         finally
@@ -2812,6 +3824,17 @@ public partial class MainWindow : Window
         await gate.WaitAsync();
         try
         {
+            if (!CanIssueDeviceRequest(
+                    binding.DeviceId, out TimeSpan protectedWait,
+                    out bool blockedByDevice, out int protectedError))
+            {
+                string reason = blockedByDevice
+                    ? $"bloqueado pelo dispositivo ({protectedError}); quarentena de uma hora"
+                    : $"em espera protegida por {Math.Ceiling(protectedWait.TotalSeconds)}s apos erro {protectedError}";
+                Log($"Requisicao P2P suprimida: dispositivo {binding.DeviceId}; {reason}.");
+                return false;
+            }
+
             int knownState = automaticDeviceLoginResults.TryGetValue(
                 binding.DeviceId, out int callbackState)
                 ? callbackState
@@ -2820,29 +3843,42 @@ public partial class MainWindow : Window
             if (knownState > 0 && !wasDisconnected)
                 return true;
 
-            disconnectedPreviewDevices.TryRemove(binding.DeviceId, out _);
-            int loginResult = CmsSdk.CMS_Client_DeviceLoginOrLogout(binding.DeviceId, true);
-            int statusResult = System.Net.IPAddress.TryParse(binding.CloudId, out _)
-                ? 0
-                : XMEyeBridge.QueryDeviceStatus(binding.CloudId);
-            Log($"Relogin P2P solicitado: dispositivo {binding.DeviceId}; tentativa {attempt}; " +
-                $"login {loginResult}; estado {statusResult}; anterior {knownState}.");
-
-            Stopwatch timer = Stopwatch.StartNew();
-            while (!isClosing && timer.Elapsed < TimeSpan.FromSeconds(12))
+            await p2pReloginGate.WaitAsync();
+            try
             {
-                qtRuntime.ProcessEvents();
-                if (automaticDeviceLoginResults.TryGetValue(
-                        binding.DeviceId, out int currentState) && currentState > 0)
+                // O VMS Pro deixa o monitor interno do CMS concluir o login. Chamar
+                // DeviceLoginOrLogout e StartPreview enquanto o dispositivo ainda
+                // está recusado multiplica as tentativas por canal e transforma
+                // erros transitórios -7 em bloqueio -27.
+                Log($"Aguardando o monitor interno do CMS: dispositivo {binding.DeviceId}; " +
+                    $"tentativa visual {attempt}; estado anterior {knownState}.");
+
+                // Never call DeviceLoginOrLogout automatically here. The CMS
+                // monitor already owns the device login state; a second login
+                // multiplied by the number of channels is what led devices to
+                // reject requests and eventually return -27.
+
+                Stopwatch timer = Stopwatch.StartNew();
+                while (!isClosing && timer.Elapsed < TimeSpan.FromSeconds(12))
                 {
-                    Log($"Relogin P2P confirmado: dispositivo {binding.DeviceId}; " +
-                        $"tentativa {attempt}; estado {currentState}.");
-                    return true;
+                    qtRuntime.ProcessEvents();
+                    if (automaticDeviceLoginResults.TryGetValue(
+                            binding.DeviceId, out int currentState) && currentState > 0)
+                    {
+                        disconnectedPreviewDevices.TryRemove(binding.DeviceId, out _);
+                        Log($"Login P2P confirmado pelo monitor do CMS: dispositivo {binding.DeviceId}; " +
+                            $"tentativa {attempt}; estado {currentState}.");
+                        return true;
+                    }
+                    await Task.Delay(200);
                 }
-                await Task.Delay(200);
+                Log($"Login P2P ainda pendente no monitor do CMS: dispositivo {binding.DeviceId}; tentativa {attempt}.");
+                return false;
             }
-            Log($"Relogin P2P ainda pendente: dispositivo {binding.DeviceId}; tentativa {attempt}.");
-            return false;
+            finally
+            {
+                p2pReloginGate.Release();
+            }
         }
         finally
         {
@@ -2879,6 +3915,11 @@ public partial class MainWindow : Window
             deviceId = result.Info.ID;
             int channel = selectedChannel;
             previewLoginError = 0;
+            if (!CanIssueDeviceRequest(deviceId, out _, out _, out _))
+            {
+                Log($"Abertura individual suprimida: {DeviceBlockStatus(deviceId)}. Nenhuma requisicao enviada.");
+                return;
+            }
             int previewResult = CmsSdk.CMS_Client_StartPreview(
                 deviceId, 0, channel,
                 SubstreamBox.IsChecked == true ? CmsSdk.StreamType.Extra : CmsSdk.StreamType.Main,
@@ -2975,6 +4016,14 @@ public partial class MainWindow : Window
         if (found == 0 || info.ID <= 0)
             return (false, -2, info);
 
+        TrackDeviceRequestProtection(selected, info.ID);
+        if (!CanIssueDeviceRequest(info.ID, out TimeSpan protectedWait, out _, out int protectedError))
+        {
+            Log($"Abertura cancelada antes do login: erro {protectedError}; " +
+                $"quarentena restante {Math.Ceiling(protectedWait.TotalMinutes)} min. Nenhuma requisicao enviada.");
+            return (false, protectedError, info);
+        }
+
         Log("Cadastro Cloud preservado como foi criado pela sincronização oficial da conta.");
 
         Log("Aguardando o login automatico do CMS, como no VMS Pro...");
@@ -2994,7 +4043,6 @@ public partial class MainWindow : Window
         string cloudId, int selectedDeviceId, TimeSpan timeout)
     {
         Stopwatch timer = Stopwatch.StartNew();
-        int lastStatusQuery = int.MinValue;
         while (timer.Elapsed < timeout)
         {
             qtRuntime.ProcessEvents();
@@ -3014,15 +4062,6 @@ public partial class MainWindow : Window
                 }
             }
 
-            // O VMS inicia a verificacao alguns segundos apos carregar o banco.
-            // Esta consulta desperta o mesmo ciclo se ele ainda nao comecou.
-            if (lastStatusQuery == int.MinValue && timer.Elapsed >= TimeSpan.FromSeconds(3))
-            {
-                lastStatusQuery = System.Net.IPAddress.TryParse(cloudId, out _)
-                    ? 0
-                    : XMEyeBridge.QueryDeviceStatus(cloudId);
-                Log($"Ciclo automatico de estado solicitado: retorno {lastStatusQuery}.");
-            }
             await Task.Delay(100);
         }
 
@@ -3042,9 +4081,22 @@ public partial class MainWindow : Window
         {
             var existing = new CmsSdk.DeviceInfo();
             int found = GetCmsDeviceInfo(device.CloudId, ref existing);
+            CameraCatalogStore.Entry catalogEntry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+            if (catalogEntry.Paused || device.Paused)
+            {
+                // Operação somente no cadastro local: não envia logout,
+                // consulta de estado ou preview para a câmera pausada.
+                if (found != 0 && existing.ID > 0)
+                    CmsSdk.CMS_Client_RemoveDevice(existing.ID);
+                device.CmsDeviceId = 0;
+                device.Paused = true;
+                device.RuntimeStatus = "Pausada";
+                synchronized++;
+                continue;
+            }
             if (found != 0 && existing.ID > 0)
             {
-                device.CmsDeviceId = existing.ID;
+                TrackDeviceRequestProtection(device, existing.ID);
                 // As versoes anteriores gravaram por engano o upass do QR
                 // (144 caracteres). Quando a lista devolver a credencial
                 // individual de 16 caracteres, substitui esse cadastro ruim.
@@ -3054,7 +4106,6 @@ public partial class MainWindow : Window
                     synchronized++;
                     continue;
                 }
-                CmsSdk.CMS_Client_DeviceLoginOrLogout(existing.ID, false);
                 CmsSdk.CMS_Client_RemoveDevice(existing.ID);
             }
 
@@ -3062,6 +4113,7 @@ public partial class MainWindow : Window
             if (added > 0)
             {
                 device.CmsDeviceId = GetCmsDeviceId(device.CloudId);
+                TrackDeviceRequestProtection(device, device.CmsDeviceId);
                 synchronized++;
             }
             else
@@ -3086,24 +4138,6 @@ public partial class MainWindow : Window
 
     private static string FormatCmsRegistrationId(string cloudId) =>
         cloudId.Contains('_', StringComparison.Ordinal) ? cloudId : cloudId + "_Cloud";
-
-    private static int QueryAllAccountDeviceStates(
-        IReadOnlyList<CloudApi.AccountDevice> devices)
-    {
-        int queried = 0;
-        foreach (CloudApi.AccountDevice device in devices)
-        {
-            if (device.IsNetworkDevice)
-            {
-                queried++;
-                continue;
-            }
-            int result = XMEyeBridge.QueryDeviceStatus(device.CloudId);
-            if (result >= 0)
-                queried++;
-        }
-        return queried;
-    }
 
     private void ApplyCameraCatalog()
     {
@@ -3163,6 +4197,7 @@ public partial class MainWindow : Window
             ShowCameraInLiveBox.IsChecked = false;
             MirrorCameraDisplayBox.IsChecked = false;
             CameraQualityBox.SelectedIndex = 0;
+            CameraChannelCountBox.SelectedIndex = 0;
             return;
         }
 
@@ -3179,7 +4214,11 @@ public partial class MainWindow : Window
             string.IsNullOrWhiteSpace(device.Model) ? null : "Modelo: " + device.Model,
             string.IsNullOrWhiteSpace(device.Firmware) ? null : "Firmware: " + device.Firmware,
             string.IsNullOrWhiteSpace(device.ProductId) ? null : "PID: " + device.ProductId,
-            entry.KnownChannels.Count == 0
+            entry.ChannelCountOverride is 1 or 2
+                ? $"Canais configurados: {entry.ChannelCountOverride.Value}"
+                : entry.DetectedChannelCount is 1 or 2
+                    ? $"Canais detectados automaticamente: {entry.DetectedChannelCount.Value}"
+                : entry.KnownChannels.Count == 0
                 ? "Canais: serão detectados no primeiro teste"
                 : "Canais detectados: " + string.Join(", ", entry.KnownChannels.Select(channel => channel + 1)),
             device.IsNetworkDevice ? "Transporte: rede local" : "Transporte: Cloud P2P"
@@ -3195,6 +4234,13 @@ public partial class MainWindow : Window
             false => 2,
             _ => 0
         };
+        CameraChannelCountBox.SelectedIndex = entry.ChannelCountOverride switch
+        {
+            1 => 1,
+            2 => 2,
+            _ => 0
+        };
+        LoadSmartControls(device);
     }
 
     private void UseAccountLogin_Click(object sender, RoutedEventArgs e)
@@ -3545,6 +4591,12 @@ public partial class MainWindow : Window
             2 => false,
             _ => null
         };
+        entry.ChannelCountOverride = CameraChannelCountBox.SelectedIndex switch
+        {
+            1 => 1,
+            2 => 2,
+            _ => null
+        };
         device.LocalGroup = entry.Group;
         device.ShowInLiveView = entry.ShowInLiveView;
         if (credentialsChanged)
@@ -3725,6 +4777,7 @@ public partial class MainWindow : Window
         RecordingsView.Visibility = page == "Recordings" ? Visibility.Visible : Visibility.Collapsed;
         SettingsView.Visibility = page == "Settings" ? Visibility.Visible : Visibility.Collapsed;
         LiveHeaderControls.Visibility = page == "Live" ? Visibility.Visible : Visibility.Collapsed;
+        PtzSidePanel.Visibility = page == "Live" ? Visibility.Visible : Visibility.Collapsed;
         bool english = string.Equals(preferences.Language, "en", StringComparison.OrdinalIgnoreCase);
         PageTitleText.Text = page switch
         {
@@ -3751,6 +4804,16 @@ public partial class MainWindow : Window
         if (selectedPreviewWindow >= 0 &&
             previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
         {
+            if (!CanIssueDeviceRequest(selected.DeviceId, out TimeSpan wait, out _, out _))
+            {
+                string status = DeviceBlockStatus(selected.DeviceId);
+                SetPreviewStatus(selected, status, System.Drawing.Color.IndianRed);
+                Log($"Reconexao manual suprimida: {status}; restante {Math.Ceiling(wait.TotalMinutes)} min. Nenhuma requisicao enviada.");
+                System.Windows.MessageBox.Show(
+                    status + ". Nenhuma requisicao foi enviada.",
+                    "Protecao da camera", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
             Log($"Reconexao manual solicitada: dispositivo {selected.DeviceId}; " +
                 $"canal {selected.Channel}; janela {selected.Window}.");
             disconnectedPreviewDevices.TryRemove(selected.DeviceId, out _);
@@ -3758,12 +4821,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        foreach (int id in previewBindings.Values.Select(binding => binding.DeviceId).Distinct())
-        {
-            Log($"Reconexao manual solicitada: dispositivo {id}.");
-            disconnectedPreviewDevices.TryRemove(id, out _);
-            _ = RecoverDevicePreviewsAsync(id, forceOneAttempt: true);
-        }
+        System.Windows.MessageBox.Show(
+            "Selecione uma camera antes de reconectar. Nenhuma requisicao foi enviada.",
+            "Reconectar camera", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void PreferenceChanged_Click(object sender, RoutedEventArgs e)
@@ -4229,6 +5289,10 @@ public partial class MainWindow : Window
         WriteCompressedTemplate(usersDatabase, compressedTemplate);
     }
 
+    private static string GetCmsDataDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "XMEyeCloudAccountTester-CMS-v3");
+
     private static bool EnsureCmsCloudUserStore(string cloudUser)
     {
         if (string.IsNullOrWhiteSpace(cloudUser) ||
@@ -4236,11 +5300,20 @@ public partial class MainWindow : Window
                 !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
             throw new InvalidOperationException("A identidade tecnica do QR nao pode formar o banco Cloud.");
 
-        string dataDirectory = AppContext.BaseDirectory;
+        // CMS_Client_Init receives an empty path and resolves data/cloudusers
+        // relative to this dedicated LocalAppData profile. Preparing the store
+        // under AppContext.BaseDirectory left a second, unused database beside
+        // the executable and broke the first login after a complete logout.
+        string dataDirectory = GetCmsDataDirectory();
         string cloudDirectory = Path.Combine(dataDirectory, "data", "cloudusers", cloudUser);
         Directory.CreateDirectory(cloudDirectory);
         string devicesDatabase = Path.Combine(cloudDirectory, "devices.db");
-        bool imported = TryImportVmsDeviceDatabase(cloudUser, devicesDatabase);
+        // O banco do VMS serve somente para a primeira inicializacao. Copia-lo
+        // novamente em todo login apagava os IDs e o estado que o CMS havia
+        // consolidado nas sessoes anteriores, fazendo a grade voltar a abrir
+        // apenas os dois registros ainda compativeis com a copia antiga.
+        bool imported = !File.Exists(devicesDatabase) &&
+            TryImportVmsDeviceDatabase(cloudUser, devicesDatabase);
         if (!imported && !File.Exists(devicesDatabase))
         {
             // Esquema vazio extraido do devices.db oficial: Devices, Groups e
@@ -4331,15 +5404,30 @@ public partial class MainWindow : Window
 
     private async void ForgetAccount_Click(object sender, RoutedEventArgs e)
     {
+        accountLogoutInProgress = true;
+        ForgetAccountButton.IsEnabled = false;
+        qrLoginCts?.Cancel();
+        CloudSessionStore.BeginLogout();
         await DisconnectVideoAsync(log: false);
-        CloudSessionStore.Delete();
         ClearAccountDevices();
         cloudAccessToken = string.Empty;
+        captchaToken = string.Empty;
+        cloudReady = false;
         AccountBox.Clear();
         AccountPasswordBox.Clear();
-        ForgetAccountButton.IsEnabled = false;
-        Log("Dados da conta removidos da memória.");
-        await RefreshQrAsync();
+        CaptchaBox.Clear();
+        Log(CloudSessionStore.Exists
+            ? "FALHA NO LOGOUT: o arquivo protegido da sessao ainda existe."
+            : "LOGOUT INICIADO: sessao protegida removida; reiniciando para isolar a identidade nativa da conta.");
+
+        // CMSClient não expõe logout da conta e seu UnInit causa corrupção de
+        // memória quando os decodificadores já foram usados. Encerrar o processo
+        // e iniciar uma instância limpa é a forma segura de descartar toda a
+        // identidade nativa, MQTT, callbacks e tokens mantidos pela DLL.
+        if (System.Windows.Application.Current is App app)
+            app.RestartAfterAccountLogout();
+        else
+            System.Windows.Application.Current.Shutdown();
     }
 
     private void ClearAccountDevices()
@@ -4366,7 +5454,10 @@ public partial class MainWindow : Window
             .Concat(floatingPreviewWindows)
             .Distinct()
             .ToArray();
-        StopPtzCommand();
+        if (sdkReady)
+            StopPtzCommand();
+        else
+            activePtzCommand = -1;
         StopActiveTalk();
         if (soundingPreviewWindow >= 0)
         {
@@ -4450,7 +5541,9 @@ public partial class MainWindow : Window
     {
         OpenCameraButton.IsEnabled = !busy && DeviceBox.SelectedItem is CloudApi.AccountDevice;
         OpenCameraButton.Content = busy ? "CONECTANDO..." : "ABRIR CÂMERA SELECIONADA";
-        SetGridButtonsEnabled(!busy && accountDevices.Count > 0);
+        // Os botoes de layout continuam aceitando a ultima escolha. A fila
+        // serializada coalesce cliques sem permitir duas montagens concorrentes.
+        SetGridButtonsEnabled(accountDevices.Count > 0);
     }
 
     private void SetGridButtonsEnabled(bool enabled)
@@ -4594,10 +5687,19 @@ public partial class MainWindow : Window
     {
         if (isClosing)
             return;
+        if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
+            p4 is SystemFunctionCommand or PtzControlConfigCommand)
+        {
+            // Nesta build do CMS: p1=resultado, p2=deviceId, p3=canal, p4=comando.
+            HandlePtzConfigResponse(p2, p4, text1, text2, size);
+            WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
+            return;
+        }
         int lostPreviewWindow = -1;
         if (type == CmsSdk.MessageType.DeviceControl && p1 == 3)
         {
             automaticDeviceLoginResults[p2] = p4;
+            RecordDeviceRequestResult(p2, p4);
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
@@ -4629,10 +5731,11 @@ public partial class MainWindow : Window
             foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
                 confirmedPreviewWindows.TryRemove(binding.Window, out _);
         }
-        bool shouldRecoverDevice = preferences.AutoReconnect &&
+        bool deviceRequestAllowed = CanIssueDeviceRequest(p2, out _, out _, out _);
+        bool shouldRecoverDevice = preferences.AutoReconnect && deviceRequestAllowed &&
             type == CmsSdk.MessageType.DeviceControl && p1 == 4 &&
             previewBindings.Values.Any(binding => binding.DeviceId == p2);
-        bool shouldRecoverReturnedDevice = preferences.AutoReconnect &&
+        bool shouldRecoverReturnedDevice = preferences.AutoReconnect && deviceRequestAllowed &&
             type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 > 0 &&
             disconnectedPreviewDevices.TryRemove(p2, out _);
         bool shouldRecoverPreview = preferences.AutoReconnect && lostPreviewWindow >= 0;
@@ -4657,8 +5760,18 @@ public partial class MainWindow : Window
                 foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
                     SetPreviewStatus(
                         binding,
+                        IsDeviceCooldownBlocked(p2) ? DeviceBlockStatus(p2) :
                         preferences.AutoReconnect ? "Reconectando" : "Offline",
+                        IsDeviceCooldownBlocked(p2) ? System.Drawing.Color.IndianRed :
                         preferences.AutoReconnect ? System.Drawing.Color.Orange : System.Drawing.Color.IndianRed);
+            }
+            if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 == -27)
+            {
+                foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
+                    SetPreviewStatus(
+                        binding,
+                        DeviceBlockStatus(p2),
+                        System.Drawing.Color.IndianRed);
             }
             if (type == CmsSdk.MessageType.DeviceControl && p1 is 3 or 4)
             {
@@ -4667,8 +5780,10 @@ public partial class MainWindow : Window
                         binding.DeviceId == p2 && string.Equals(binding.CloudId, device.CloudId, StringComparison.Ordinal)));
                 if (changedDevice is not null)
                 {
-                    changedDevice.CmsDeviceId = p2;
-                    changedDevice.RuntimeStatus = p1 == 4 || p4 <= 0
+                    TrackDeviceRequestProtection(changedDevice, p2);
+                    changedDevice.RuntimeStatus = IsDeviceCooldownBlocked(p2)
+                        ? DeviceBlockStatus(p2)
+                        : p1 == 4 || p4 <= 0
                         ? (preferences.AutoReconnect ? "Reconectando" : "Offline")
                         : "Online";
                     DeviceBox.Items.Refresh();
@@ -4699,13 +5814,18 @@ public partial class MainWindow : Window
         recordingPlaybackTimer.Stop();
         recordingThumbnailCts?.Cancel();
         recordingPlayer.Dispose();
+        foreach (var pending in pendingPtzConfigBuffers.ToArray())
+            if (pendingPtzConfigBuffers.TryRemove(pending.Key, out IntPtr buffer) && buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(buffer);
         StopPtzCommand();
         StopActiveTalk();
         try
         {
             qrLoginCts?.Cancel();
             qrLoginCts?.Dispose();
-            foreach (int window in Enumerable.Range(0, Math.Max(videoPanels.Count, 16)))
+            foreach (int window in sdkReady
+                         ? Enumerable.Range(0, Math.Max(videoPanels.Count, 16))
+                         : Enumerable.Empty<int>())
             {
                 try { CmsSdk.CMS_Client_StopPreviewByWnd(window, 0); }
                 catch { }

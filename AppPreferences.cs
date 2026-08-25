@@ -6,11 +6,15 @@ namespace XMEyeCloudTester;
 internal sealed class AppPreferences
 {
     public int LastGridSize { get; set; } = 9;
-    public bool RestoreLastLayout { get; set; } = true;
-    public bool AutoReconnect { get; set; } = true;
+    // O VMS Pro usa autoRealPlay=false. Novas instalacoes aguardam uma acao
+    // do usuario; perfis que optaram por restaurar esperam o monitor estabilizar.
+    public bool RestoreLastLayout { get; set; } = false;
+    // Reconnection is opt-in. Some XM devices lock remote access after a burst
+    // of rejected P2P logins, so a fresh installation must never retry blindly.
+    public bool AutoReconnect { get; set; } = false;
     public bool DefaultSd { get; set; } = true;
     public int ConnectionTimeoutSeconds { get; set; } = 60;
-    public int ReconnectDelaySeconds { get; set; } = 5;
+    public int ReconnectDelaySeconds { get; set; } = 60;
     public List<string> LiveLayoutOrder { get; set; } = [];
     public string CaptureFolder { get; set; } = string.Empty;
     public string RecordingFolder { get; set; } = string.Empty;
@@ -54,8 +58,8 @@ internal sealed class AppPreferences
                 return new AppPreferences();
             if (loaded.ConnectionTimeoutSeconds is not (30 or 60 or 90))
                 loaded.ConnectionTimeoutSeconds = 60;
-            if (loaded.ReconnectDelaySeconds is not (3 or 5 or 10 or 15))
-                loaded.ReconnectDelaySeconds = 5;
+            if (loaded.ReconnectDelaySeconds is not (60 or 120 or 300 or 900))
+                loaded.ReconnectDelaySeconds = 60;
             return loaded;
         }
         catch

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -7,6 +8,9 @@ namespace XMEyeCloudTester;
 public partial class App : System.Windows.Application
 {
     private Mutex? singleInstanceMutex;
+    private bool restartAfterLogout;
+
+    internal static string? AccountLogoutCleanupMessage { get; private set; }
 
     static App()
     {
@@ -35,6 +39,38 @@ public partial class App : System.Windows.Application
             Shutdown();
             return;
         }
+
+        AccountLogoutCleanupMessage = CloudSessionStore.CompletePendingLogout();
         base.OnStartup(e);
+    }
+
+    internal void RestartAfterAccountLogout()
+    {
+        restartAfterLogout = true;
+        Shutdown();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        bool shouldRestart = restartAfterLogout;
+        try { singleInstanceMutex?.ReleaseMutex(); }
+        catch (ApplicationException) { }
+        singleInstanceMutex?.Dispose();
+        singleInstanceMutex = null;
+
+        base.OnExit(e);
+
+        if (!shouldRestart)
+            return;
+
+        string? executable = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(executable) && File.Exists(executable))
+        {
+            Process.Start(new ProcessStartInfo(executable)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = AppContext.BaseDirectory
+            });
+        }
     }
 }

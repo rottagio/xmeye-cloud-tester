@@ -11,7 +11,16 @@ ICSEE/XMEYE MONITOR — TESTE RÁPIDO
 8. Abra Configurações para ajustar reconexão, pastas e armazenamento.
 
 O aplicativo restaura a sessão e o último layout automaticamente. Use Sair da
-conta para remover a sessão protegida. Senhas e tokens nunca aparecem no log.
+conta para remover a sessão protegida, encerrar o motor nativo e isolar o perfil
+Cloud do CMS. O aplicativo reinicia mostrando um QR limpo para outra conta.
+Senhas e tokens nunca aparecem no log.
+
+PROTEÇÃO CONTRA BLOQUEIO
+- A reconexão automática vem desligada e, quando habilitada, faz no máximo três
+  tentativas por preview com intervalo mínimo de um minuto.
+- Trocas rápidas entre 1/4/9/16 são enfileiradas; somente a última grade pedida
+  é montada depois que a operação nativa atual terminar.
+- Canais já recusados não são testados novamente durante a mesma montagem.
 
 Se houver falha, use Configurações > Exportar diagnóstico. Não envie prints que
 revelem QR, e-mail, serial completo ou outras credenciais.

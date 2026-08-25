@@ -11,6 +11,7 @@ namespace XMEyeCloudTester.Launcher;
 internal enum UpdateResult
 {
     None,
+    Current,
     Installing
 }
 
@@ -31,9 +32,9 @@ internal static class UpdateService
         try
         {
             ReleaseInfo? release = await GetLatestReleaseAsync();
-            Version current = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
+            Version current = GetInstalledVersion(installDirectory);
             if (release is null || release.Version <= current)
-                return UpdateResult.None;
+                return release is null ? UpdateResult.None : UpdateResult.Current;
 
             string workDirectory = Path.Combine(
                 Path.GetTempPath(), "XMEyeCloudTester-Update-" + Guid.NewGuid().ToString("N"));
@@ -45,7 +46,7 @@ internal static class UpdateService
             await DownloadAsync(release.DownloadUrl, zipPath);
             VerifyDigest(zipPath, release.Digest);
             ExtractSafely(zipPath, stagingDirectory);
-            ValidateUpdate(stagingDirectory);
+            ValidateUpdate(stagingDirectory, release.Version);
             StartInstallerScript(
                 workDirectory, stagingDirectory, installDirectory, waitPid, release.Version);
             return UpdateResult.Installing;
@@ -136,7 +137,22 @@ internal static class UpdateService
         }
     }
 
-    private static void ValidateUpdate(string stagingDirectory)
+    private static Version GetInstalledVersion(string installDirectory)
+    {
+        Version launcher = Normalize(Assembly.GetExecutingAssembly().GetName().Version);
+        string appPath = Path.Combine(installDirectory, "XMEyeCloudTester.App.dll");
+        if (!File.Exists(appPath))
+            return new Version(0, 0, 0);
+        Version app = Normalize(AssemblyName.GetAssemblyName(appPath).Version);
+        // Uma instalação parcial deve ser reparada mesmo quando somente o
+        // lançador já possui a versão da release.
+        return launcher <= app ? launcher : app;
+    }
+
+    private static Version Normalize(Version? version) => new(
+        version?.Major ?? 0, version?.Minor ?? 0, Math.Max(0, version?.Build ?? 0));
+
+    private static void ValidateUpdate(string stagingDirectory, Version releaseVersion)
     {
         string[] requiredFiles =
         [
@@ -149,6 +165,15 @@ internal static class UpdateService
         ];
         if (requiredFiles.Any(file => !File.Exists(Path.Combine(stagingDirectory, file))))
             throw new InvalidDataException("O pacote nao contem todos os modulos obrigatorios do aplicativo.");
+
+        Version expected = Normalize(releaseVersion);
+        Version launcher = Normalize(AssemblyName.GetAssemblyName(
+            Path.Combine(stagingDirectory, "XMEyeCloudTester.dll")).Version);
+        Version app = Normalize(AssemblyName.GetAssemblyName(
+            Path.Combine(stagingDirectory, "XMEyeCloudTester.App.dll")).Version);
+        if (launcher != expected || app != expected)
+            throw new InvalidDataException(
+                $"Versoes inconsistentes no pacote: release {expected}, atualizador {launcher}, aplicativo {app}.");
     }
 
     private static void StartInstallerScript(
@@ -172,48 +197,101 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $logPath -Value ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $Message)
 }
 
+$backup = Join-Path (Split-Path -Parent $Source) 'backup'
+$backupReady = $false
+$createdTargets = [Collections.Generic.List[string]]::new()
 try {
     Write-UpdateLog "Inicio da instalacao $Version. Destino: $Destination"
     Wait-Process -Id $LauncherProcessId -ErrorAction SilentlyContinue
     if ($AppProcessId -gt 0) {
         Wait-Process -Id $AppProcessId -ErrorAction SilentlyContinue
     }
-    Start-Sleep -Milliseconds 500
+
+    $destinationRoot = [IO.Path]::GetFullPath($Destination).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $deadline = (Get-Date).AddSeconds(45)
+    do {
+        $runningApps = @(Get-Process -Name 'XMEyeCloudTester.App' -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($destinationRoot, [StringComparison]::OrdinalIgnoreCase) }
+            catch { $false }
+        })
+        if ($runningApps.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if ($runningApps.Count -gt 0) {
+        throw 'O aplicativo ainda esta encerrando. Tente atualizar novamente em alguns segundos.'
+    }
 
     $sourceRoot = [IO.Path]::GetFullPath($Source).TrimEnd(
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
     Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
-        # Arquivos iniciados por ! existem somente para reparar o atualizador
-        # antigo, que removia por engano o primeiro caractere do caminho.
+        if ($_.Name.StartsWith('!')) { return }
+        $relative = $_.FullName.Substring($sourceRoot.Length)
+        $target = Join-Path $Destination $relative
+        if (Test-Path -LiteralPath $target) {
+            $backupTarget = Join-Path $backup $relative
+            $backupParent = Split-Path -Parent $backupTarget
+            New-Item -ItemType Directory -Path $backupParent -Force | Out-Null
+            [IO.File]::Copy($target, $backupTarget, $true)
+        } else {
+            $createdTargets.Add($target)
+        }
+    }
+    $backupReady = $true
+
+    Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
         if ($_.Name.StartsWith('!')) { return }
         $relative = $_.FullName.Substring($sourceRoot.Length)
         $target = Join-Path $Destination $relative
         $parent = Split-Path -Parent $target
-        if (-not (Test-Path -LiteralPath $parent)) {
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        }
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
         [IO.File]::Copy($_.FullName, $target, $true)
         $sourceHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
         $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
-        if ($sourceHash -ne $targetHash) {
-            throw "A verificacao do arquivo $relative falhou."
-        }
+        if ($sourceHash -ne $targetHash) { throw "A verificacao do arquivo $relative falhou." }
         Write-UpdateLog "Arquivo confirmado: $relative ($targetHash)"
     }
 
-    Write-UpdateLog "Instalacao $Version concluida."
+    $launcherVersion = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $Destination 'XMEyeCloudTester.dll')).Version.ToString(3)
+    $appVersion = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $Destination 'XMEyeCloudTester.App.dll')).Version.ToString(3)
+    if ($launcherVersion -ne $Version -or $appVersion -ne $Version) {
+        throw "Versoes finais inconsistentes: $launcherVersion / $appVersion; esperado $Version."
+    }
+    Write-UpdateLog "Instalacao $Version concluida e verificada."
     Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
-    Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
 catch {
-    Write-UpdateLog "ERRO: $($_.Exception.Message)"
+    $failure = $_.Exception.Message
+    Write-UpdateLog "ERRO: $failure"
+    if ($backupReady) {
+        Get-ChildItem -LiteralPath $backup -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $backupRoot = [IO.Path]::GetFullPath($backup).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            $relative = $_.FullName.Substring($backupRoot.Length)
+            $target = Join-Path $Destination $relative
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            [IO.File]::Copy($_.FullName, $target, $true)
+        }
+        foreach ($target in $createdTargets) {
+            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        }
+        Write-UpdateLog 'Instalacao anterior restaurada.'
+    }
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
-        "A atualizacao falhou. O detalhe foi salvo em:`n$logPath`n`n$($_.Exception.Message)",
+        "A atualizacao falhou e a versao anterior foi preservada. O detalhe foi salvo em:`n$logPath`n`n$failure",
         'Atualizacao do XMEye Cloud Tester', 'OK', 'Error') | Out-Null
-    Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
+    $launcherDll = Join-Path $Destination 'XMEyeCloudTester.dll'
+    $appDll = Join-Path $Destination 'XMEyeCloudTester.App.dll'
+    if ((Test-Path -LiteralPath $launcherDll) -and (Test-Path -LiteralPath $appDll)) {
+        $launcherVersion = [Reflection.AssemblyName]::GetAssemblyName($launcherDll).Version.ToString(3)
+        $appVersion = [Reflection.AssemblyName]::GetAssemblyName($appDll).Version.ToString(3)
+        if ($launcherVersion -eq $appVersion) {
+            Start-Process -FilePath (Join-Path $Destination 'XMEyeCloudTester.exe') -ArgumentList '--skip-update' -WorkingDirectory $Destination
+        }
+    }
     exit 1
 }
 """);

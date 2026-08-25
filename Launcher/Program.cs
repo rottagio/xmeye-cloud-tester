@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
 
 namespace XMEyeCloudTester.Launcher;
@@ -13,16 +14,23 @@ internal static class Program
         {
             string baseDirectory = AppContext.BaseDirectory;
             int waitPid = ParseWaitPid(args);
+            bool manualUpdate = args.Contains("--manual-update", StringComparer.OrdinalIgnoreCase);
             if (!args.Contains("--skip-update", StringComparer.OrdinalIgnoreCase))
             {
                 UpdateResult update = await UpdateService.CheckAndInstallAsync(baseDirectory, waitPid);
                 if (update == UpdateResult.Installing)
                     return;
+                if (manualUpdate && update == UpdateResult.Current)
+                    MessageBox.Show(
+                        "Você já está usando a versão mais recente.",
+                        "Atualização do XMEye Cloud Tester",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
 
             string application = Path.Combine(baseDirectory, "XMEyeCloudTester.App.exe");
             if (!File.Exists(application))
                 throw new FileNotFoundException("A interface principal não foi encontrada.", application);
+            EnsureVersionParity(baseDirectory);
 
             string plugins = Path.Combine(baseDirectory, "plugins");
             var startInfo = new ProcessStartInfo(application)
@@ -60,4 +68,20 @@ internal static class Program
         argument.Equals("--manual-update", StringComparison.OrdinalIgnoreCase) ||
         argument.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase) ||
         argument.StartsWith("--updated=", StringComparison.OrdinalIgnoreCase);
+
+    private static void EnsureVersionParity(string baseDirectory)
+    {
+        Version launcher = Normalize(Assembly.GetExecutingAssembly().GetName().Version);
+        string appAssembly = Path.Combine(baseDirectory, "XMEyeCloudTester.App.dll");
+        if (!File.Exists(appAssembly))
+            throw new FileNotFoundException("O módulo principal não foi encontrado.", appAssembly);
+        Version app = Normalize(AssemblyName.GetAssemblyName(appAssembly).Version);
+        if (launcher != app)
+            throw new InvalidDataException(
+                $"A instalação está incompleta (atualizador {launcher}, aplicativo {app}). " +
+                "Use o botão Atualizar para reinstalar o pacote completo.");
+    }
+
+    private static Version Normalize(Version? version) => new(
+        version?.Major ?? 0, version?.Minor ?? 0, Math.Max(0, version?.Build ?? 0));
 }

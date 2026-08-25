@@ -13,7 +13,15 @@ internal sealed class CameraCatalogStore
         public string Group { get; set; } = "Casa";
         public int Order { get; set; } = int.MaxValue;
         public bool ShowInLiveView { get; set; } = true;
+        // Permanece no catálogo, mas não é entregue ao motor CMS enquanto pausada.
+        public bool Paused { get; set; }
         public List<int> KnownChannels { get; set; } = [];
+        // null usa a descoberta automatica; 1 ou 2 respeita a quantidade
+        // confirmada pelo usuario e impede que historico antigo crie canais.
+        public int? ChannelCountOverride { get; set; }
+        // Preenchido somente depois de validar o canal principal e testar o
+        // secundario no mesmo ciclo. Nao depende do nome ou modelo da camera.
+        public int? DetectedChannelCount { get; set; }
         // null acompanha a qualidade global; true = SD; false = HD.
         public bool? PreferredSd { get; set; }
         // Espelha somente a exibição no computador; não altera a câmera.
@@ -33,6 +41,16 @@ internal sealed class CameraCatalogStore
         public bool AudibleWarning { get; set; }
         public bool LightWarning { get; set; }
         public string TriggerMessage { get; set; } = "Movimento detectado";
+        // A ausência da chave significa "capacidade ainda desconhecida".
+        // Isso evita oferecer PTZ por tentativa em um canal que não o possui.
+        public Dictionary<int, bool> PtzSupportedChannels { get; set; } = [];
+        public Dictionary<int, bool> PtzMirrorChannels { get; set; } = [];
+        public Dictionary<int, bool> PtzFlipChannels { get; set; } = [];
+        // Erro -27: impede qualquer nova requisicao ao dispositivo durante uma
+        // hora. Fica no catalogo para que fechar/reabrir o app nao contorne a
+        // protecao e cause uma nova rajada de tentativas.
+        public DateTime? RequestBlockedUntilUtc { get; set; }
+        public int LastRequestError { get; set; }
     }
 
     public Dictionary<string, Entry> Cameras { get; set; } = new(StringComparer.Ordinal);
@@ -89,6 +107,9 @@ internal sealed class CameraCatalogStore
                 ? "Casa"
                 : entry.Group.Trim();
             devices[index].ShowInLiveView = entry.ShowInLiveView;
+            devices[index].Paused = entry.Paused;
+            if (entry.Paused)
+                devices[index].RuntimeStatus = "Pausada";
         }
         devices.Sort((left, right) =>
         {
@@ -116,6 +137,17 @@ internal sealed class CameraCatalogStore
         entry.KnownChannels.Add(channel);
         entry.KnownChannels.Sort();
         return true;
+    }
+
+    public bool SetDetectedChannelCount(CloudApi.AccountDevice device, int count)
+    {
+        count = Math.Clamp(count, 1, 2);
+        Entry entry = GetOrCreate(device, int.MaxValue);
+        bool changed = entry.DetectedChannelCount != count;
+        entry.DetectedChannelCount = count;
+        if (count == 1)
+            changed |= entry.KnownChannels.RemoveAll(channel => channel > 0) > 0;
+        return changed;
     }
 
     public bool IsKnownChannel(CloudApi.AccountDevice device, int channel) =>
