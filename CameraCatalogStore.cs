@@ -23,6 +23,16 @@ internal sealed class CameraCatalogStore
         public string Identifier { get; set; } = string.Empty;
         public int NetworkPort { get; set; } = 34567;
         public string DeviceUser { get; set; } = string.Empty;
+        public bool MotionTracking { get; set; }
+        public int MotionSensitivity { get; set; } = 3;
+        public int TrackingSeconds { get; set; } = 15;
+        public int TrackingPreset { get; set; }
+        public bool HumanDetection { get; set; }
+        public bool SmartAlert { get; set; }
+        public bool ShowTrace { get; set; }
+        public bool AudibleWarning { get; set; }
+        public bool LightWarning { get; set; }
+        public string TriggerMessage { get; set; } = "Movimento detectado";
     }
 
     public Dictionary<string, Entry> Cameras { get; set; } = new(StringComparer.Ordinal);

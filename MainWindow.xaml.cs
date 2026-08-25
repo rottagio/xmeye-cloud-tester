@@ -49,6 +49,7 @@ public partial class MainWindow : Window
     private readonly List<Forms.Label> videoLabels = [];
     private readonly List<Forms.Label> videoBadges = [];
     private readonly List<Forms.Panel> videoContainers = [];
+    private readonly List<Forms.Panel> videoHoverPanels = [];
     private readonly HashSet<int> activePreviewWindows = [];
     private readonly ConcurrentDictionary<int, PreviewBinding> previewBindings = new();
     private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
@@ -95,7 +96,16 @@ public partial class MainWindow : Window
     {
         Interval = TimeSpan.FromMinutes(1)
     };
+    private readonly DispatcherTimer layoutRestoreTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(900)
+    };
+    private readonly Forms.Timer cameraHoverTimer = new()
+    {
+        Interval = 220
+    };
     private bool onlineRefreshBusy;
+    private bool gridOpening;
     private readonly Forms.Panel recordingPlaybackPanel = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -182,7 +192,20 @@ public partial class MainWindow : Window
         VideoHost.Child = videoGrid;
         RecordingPlayerHost.Child = recordingPlaybackPanel;
         recordingPlaybackTimer.Tick += RecordingPlaybackTimer_Tick;
+        layoutRestoreTimer.Tick += (_, _) =>
+        {
+            layoutRestoreTimer.Stop();
+            if (gridOpening)
+            {
+                layoutRestoreTimer.Start();
+                return;
+            }
+            RestoreConfiguredVideoGrid(onlyWhenChanged: true);
+        };
+        cameraHoverTimer.Tick += (_, _) => UpdateCameraHoverControls();
+        cameraHoverTimer.Start();
         ConfigureVideoGrid(1);
+        UpdateStreamQualityButtons();
         Loaded += OnLoaded;
         Closing += OnClosing;
         onlineRefreshTimer.Tick += async (_, _) => await RefreshOnlineDevicesAsync(false);
@@ -839,6 +862,7 @@ public partial class MainWindow : Window
         videoLabels.Clear();
         videoBadges.Clear();
         videoContainers.Clear();
+        videoHoverPanels.Clear();
         mirroredPreviewWindows.Clear();
         for (int index = 0; index < side * side; index++)
         {
@@ -884,14 +908,37 @@ public partial class MainWindow : Window
                 Visible = false,
                 Anchor = Forms.AnchorStyles.Top | Forms.AnchorStyles.Right
             };
+            var hover = new Forms.FlowLayoutPanel
+            {
+                AutoSize = false,
+                Width = 144,
+                Height = 68,
+                BackColor = System.Drawing.Color.FromArgb(215, 8, 20, 33),
+                FlowDirection = Forms.FlowDirection.LeftToRight,
+                Padding = new Forms.Padding(3),
+                Margin = Forms.Padding.Empty,
+                Visible = false,
+                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
+                WrapContents = true
+            };
+            AddHoverButton(hover, "🔊", "Ouvir/silenciar", () => ToggleAudio_Click(this, new RoutedEventArgs()), window);
+            AddHoverButton(hover, "🎙", "Falar", () => ToggleTalk_Click(this, new RoutedEventArgs()), window);
+            AddHoverButton(hover, "📷", "Fotografar", () => CaptureSelected_Click(this, new RoutedEventArgs()), window);
+            AddHoverButton(hover, "●", "Gravar", () => ToggleRecord_Click(this, new RoutedEventArgs()), window);
+            AddHoverButton(hover, "◀", "PTZ esquerda", () => SendPtzPulse(2), window);
+            AddHoverButton(hover, "▲", "PTZ acima", () => SendPtzPulse(0), window);
+            AddHoverButton(hover, "▼", "PTZ abaixo", () => SendPtzPulse(1), window);
+            AddHoverButton(hover, "▶", "PTZ direita", () => SendPtzPulse(3), window);
             container.Controls.Add(panel);
             container.Controls.Add(label);
             container.Controls.Add(badge);
+            container.Controls.Add(hover);
             Forms.ContextMenuStrip cameraMenu = CreatePreviewContextMenu(window);
             container.ContextMenuStrip = cameraMenu;
             panel.ContextMenuStrip = cameraMenu;
             label.ContextMenuStrip = cameraMenu;
             badge.ContextMenuStrip = cameraMenu;
+            hover.ContextMenuStrip = cameraMenu;
             cameraToolTip.SetToolTip(panel, "Clique para selecionar; botão direito para áudio, gravação, PTZ, zoom e outras ações.");
             cameraToolTip.SetToolTip(label, "Arraste para reorganizar; botão direito para controlar esta câmera.");
             void PositionBadge()
@@ -900,6 +947,10 @@ public partial class MainWindow : Window
                 badge.Top = label.Height + 4;
                 if (badge.Visible)
                     badge.BringToFront();
+                hover.Left = Math.Max(2, container.ClientSize.Width - hover.Width - 5);
+                hover.Top = Math.Max(label.Height + 3, container.ClientSize.Height - hover.Height - 5);
+                if (hover.Visible)
+                    hover.BringToFront();
             }
             container.Resize += (_, _) => PositionBadge();
             PositionBadge();
@@ -917,6 +968,7 @@ public partial class MainWindow : Window
             videoLabels.Add(label);
             videoBadges.Add(badge);
             videoContainers.Add(container);
+            videoHoverPanels.Add(hover);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
         selectedPreviewWindow = -1;
@@ -931,9 +983,62 @@ public partial class MainWindow : Window
         CaptureButton.IsEnabled = false;
         TalkButton.IsEnabled = false;
         TalkButton.Content = "🎙  Falar";
-        PtzButton.IsEnabled = false;
+        PtzSidePanel.IsEnabled = false;
+        PtzCameraText.Text = "Selecione uma câmera";
         SeparateWindowButton.IsEnabled = false;
         videoGrid.ResumeLayout(performLayout: true);
+    }
+
+    private void AddHoverButton(
+        Forms.FlowLayoutPanel host, string text, string tooltip, Action action, int window)
+    {
+        var button = new Forms.Button
+        {
+            Text = text,
+            Width = 31,
+            Height = 28,
+            FlatStyle = Forms.FlatStyle.Flat,
+            BackColor = System.Drawing.Color.FromArgb(24, 48, 75),
+            ForeColor = System.Drawing.Color.White,
+            Margin = new Forms.Padding(2),
+            Padding = Forms.Padding.Empty,
+            TabStop = false,
+            Cursor = Forms.Cursors.Hand
+        };
+        button.FlatAppearance.BorderColor = System.Drawing.Color.FromArgb(55, 91, 127);
+        button.Click += (_, _) =>
+        {
+            SelectPreviewWindow(window);
+            action();
+        };
+        cameraToolTip.SetToolTip(button, tooltip);
+        host.Controls.Add(button);
+    }
+
+    private void UpdateCameraHoverControls()
+    {
+        if (isClosing || videoContainers.Count != videoHoverPanels.Count)
+            return;
+        System.Drawing.Point cursor = Forms.Cursor.Position;
+        for (int window = 0; window < videoContainers.Count; window++)
+        {
+            Forms.Panel container = videoContainers[window];
+            bool show = container.Visible && previewBindings.ContainsKey(window) &&
+                container.RectangleToScreen(container.ClientRectangle).Contains(cursor);
+            if (videoHoverPanels[window].Visible != show)
+            {
+                videoHoverPanels[window].Visible = show;
+                if (show)
+                    videoHoverPanels[window].BringToFront();
+            }
+        }
+    }
+
+    private async void SendPtzPulse(int command)
+    {
+        SendPtzCommand(command, stop: false);
+        await Task.Delay(240);
+        StopPtzCommand();
     }
 
     private Forms.ContextMenuStrip CreatePreviewContextMenu(int window)
@@ -951,7 +1056,7 @@ public partial class MainWindow : Window
         Add("⏺  Iniciar / parar gravação", () => ToggleRecord_Click(this, new RoutedEventArgs()));
         Add("🎙  Falar", () => ToggleTalk_Click(this, new RoutedEventArgs()));
         menu.Items.Add(new Forms.ToolStripSeparator());
-        Add("✥  PTZ e zoom", () => TogglePtzPopup_Click(this, new RoutedEventArgs()));
+        Add("✥  Selecionar para PTZ", () => PtzCameraText.Text = SelectedCameraText.Text);
         Add("↕  Girar 180°", () => _ = RotateSelectedCameraAsync());
         Forms.ToolStripMenuItem mirrorItem = (Forms.ToolStripMenuItem)Add(
             "⇄  Espelhar exibição", ToggleMirrorDisplay);
@@ -970,11 +1075,10 @@ public partial class MainWindow : Window
         return menu;
     }
 
-    private async Task RotateSelectedCameraAsync()
+    private Task RotateSelectedCameraAsync()
     {
-        SendPtzCommand(38, stop: false);
-        await Task.Delay(180);
-        StopPtzCommand();
+        SendPtzOneShot(34, 5, "girar imagem");
+        return Task.CompletedTask;
     }
 
     private void ToggleMirrorDisplay_Click(object sender, RoutedEventArgs e) =>
@@ -1029,7 +1133,7 @@ public partial class MainWindow : Window
             ApplyLocalMirror(binding.Window, mirror);
     }
 
-    private void RestoreConfiguredVideoGrid()
+    private void RestoreConfiguredVideoGrid(bool onlyWhenChanged = false)
     {
         if (videoContainers.Count == 0)
             return;
@@ -1051,6 +1155,23 @@ public partial class MainWindow : Window
                 .Where(window => !previewBindings.ContainsKey(window)))
             .Take(visibleSlots)
             .ToList();
+
+        if (onlyWhenChanged)
+        {
+            bool changed = false;
+            for (int visualIndex = 0; visualIndex < visualOrder.Count; visualIndex++)
+            {
+                Forms.Panel container = videoContainers[visualOrder[visualIndex]];
+                if (!container.Visible || videoGrid.GetColumn(container) != visualIndex % side ||
+                    videoGrid.GetRow(container) != visualIndex / side)
+                {
+                    changed = true;
+                    break;
+                }
+            }
+            if (!changed)
+                return;
+        }
 
         videoGrid.SuspendLayout();
         for (int index = 0; index < videoContainers.Count; index++)
@@ -1081,6 +1202,17 @@ public partial class MainWindow : Window
         Log($"Grade restaurada sem mover janelas nativas: {currentLayoutSlots} quadros em {side}x{side}.");
     }
 
+    private void ScheduleLayoutRestore()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke((Action)ScheduleLayoutRestore);
+            return;
+        }
+        layoutRestoreTimer.Stop();
+        layoutRestoreTimer.Start();
+    }
+
     private void SelectPreviewWindow(int window)
     {
         if (!previewBindings.TryGetValue(window, out PreviewBinding? binding))
@@ -1102,8 +1234,12 @@ public partial class MainWindow : Window
         AudioButton.IsEnabled = online;
         RecordButton.IsEnabled = online;
         TalkButton.IsEnabled = online;
-        PtzButton.IsEnabled = online;
+        PtzSidePanel.IsEnabled = online;
+        PtzCameraText.Text = online
+            ? $"{binding.DisplayName} — Canal {binding.Channel + 1}"
+            : $"{binding.DisplayName} — offline";
         SeparateWindowButton.IsEnabled = online;
+        LoadSmartControls(binding);
         UpdateAudioButton(window);
         UpdateRecordButton(window);
         UpdateTalkButton(binding);
@@ -1177,16 +1313,6 @@ public partial class MainWindow : Window
             RefreshPreviewHeader(binding.Window);
     }
 
-    private void TogglePtzPopup_Click(object sender, RoutedEventArgs e)
-    {
-        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow))
-        {
-            SelectedCameraText.Text = "Selecione uma câmera online para usar PTZ";
-            return;
-        }
-        PtzPopup.IsOpen = !PtzPopup.IsOpen;
-    }
-
     private void PtzCommand_Down(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (sender is not FrameworkElement element ||
@@ -1211,14 +1337,40 @@ public partial class MainWindow : Window
             StopPtzCommand();
     }
 
-    private async void PtzOneShot_Click(object sender, RoutedEventArgs e)
+    private void PtzOneShot_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element ||
             !int.TryParse(element.Tag?.ToString(), out int command))
             return;
-        SendPtzCommand(command, stop: false);
-        await Task.Delay(180);
-        StopPtzCommand();
+        SendPtzOneShot(command, 5, command == 34 ? "girar imagem" : "reiniciar posição PTZ");
+    }
+
+    private int SelectedPresetNumber()
+    {
+        if (PtzPresetBox.SelectedItem is ComboBoxItem item &&
+            int.TryParse(item.Tag?.ToString(), out int value))
+            return value;
+        return 1;
+    }
+
+    private void PtzPresetGo_Click(object sender, RoutedEventArgs e) =>
+        SendPtzOneShot(19, SelectedPresetNumber(), "abrir posição favorita");
+
+    private void PtzPresetSave_Click(object sender, RoutedEventArgs e) =>
+        SendPtzOneShot(17, SelectedPresetNumber(), "salvar posição favorita");
+
+    private void SendPtzOneShot(int command, int value, string description)
+    {
+        if (selectedPreviewWindow < 0 || !confirmedPreviewWindows.ContainsKey(selectedPreviewWindow))
+        {
+            SelectedCameraText.Text = "Selecione uma câmera online para usar PTZ";
+            return;
+        }
+        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, value, 0);
+        SelectedCameraText.Text = result > 0
+            ? $"Comando enviado: {description} {value}"
+            : $"A câmera não confirmou: {description}";
+        Log($"PTZ favorito: janela {selectedPreviewWindow}; comando {command}; posição {value}; retorno {result}.");
     }
 
     private void SendPtzCommand(int command, bool stop)
@@ -1241,6 +1393,74 @@ public partial class MainWindow : Window
         activePtzCommand = -1;
         try { SendPtzCommand(command, stop: true); }
         catch { }
+    }
+
+    private CameraCatalogStore.Entry? SelectedCatalogEntry()
+    {
+        if (selectedPreviewWindow < 0 ||
+            !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding))
+            return null;
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+        return device is null ? null : cameraCatalog.GetOrCreate(device, int.MaxValue);
+    }
+
+    private void LoadSmartControls(PreviewBinding binding)
+    {
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
+            string.Equals(item.CloudId, binding.CloudId, StringComparison.Ordinal));
+        if (device is null)
+            return;
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        MotionTrackingBox.IsChecked = entry.MotionTracking;
+        MotionSensitivitySlider.Value = Math.Clamp(entry.MotionSensitivity, 1, 6);
+        foreach (ComboBoxItem item in TrackingTimeBox.Items)
+            if (int.TryParse(item.Tag?.ToString(), out int seconds) && seconds == entry.TrackingSeconds)
+                TrackingTimeBox.SelectedItem = item;
+        foreach (ComboBoxItem item in TrackingPositionBox.Items)
+            if (int.TryParse(item.Tag?.ToString(), out int preset) && preset == entry.TrackingPreset)
+                TrackingPositionBox.SelectedItem = item;
+        HumanDetectionBox.IsChecked = entry.HumanDetection;
+        SmartAlertBox.IsChecked = entry.SmartAlert;
+        TraceBox.IsChecked = entry.ShowTrace;
+        AudibleWarningBox.IsChecked = entry.AudibleWarning;
+        LightWarningBox.IsChecked = entry.LightWarning;
+        TriggerMessageBox.Text = string.IsNullOrWhiteSpace(entry.TriggerMessage)
+            ? "Movimento detectado"
+            : entry.TriggerMessage;
+        SmartControlStatusText.Text = "Configuração local carregada. O envio só é habilitado quando o modelo confirma suporte.";
+    }
+
+    private void ApplySmartControls_Click(object sender, RoutedEventArgs e)
+    {
+        CameraCatalogStore.Entry? entry = SelectedCatalogEntry();
+        if (entry is null || selectedPreviewWindow < 0 ||
+            !previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding))
+        {
+            SmartControlStatusText.Text = "Selecione uma câmera online.";
+            return;
+        }
+        entry.MotionTracking = MotionTrackingBox.IsChecked == true;
+        entry.MotionSensitivity = (int)MotionSensitivitySlider.Value;
+        entry.TrackingSeconds = TrackingTimeBox.SelectedItem is ComboBoxItem item &&
+            int.TryParse(item.Tag?.ToString(), out int seconds) ? seconds : 15;
+        entry.TrackingPreset = TrackingPositionBox.SelectedItem is ComboBoxItem positionItem &&
+            int.TryParse(positionItem.Tag?.ToString(), out int preset) ? preset : 0;
+        entry.HumanDetection = HumanDetectionBox.IsChecked == true;
+        entry.SmartAlert = SmartAlertBox.IsChecked == true;
+        entry.ShowTrace = TraceBox.IsChecked == true;
+        entry.AudibleWarning = AudibleWarningBox.IsChecked == true;
+        entry.LightWarning = LightWarningBox.IsChecked == true;
+        entry.TriggerMessage = TriggerMessageBox.Text.Trim();
+        SaveCameraCatalog();
+
+        // As estruturas binárias desses recursos variam por firmware. O CMS
+        // empacotado não publica uma ABI segura para consultá-las. Guardamos a
+        // intenção por câmera, mas jamais exibimos um falso "aplicado".
+        SmartControlStatusText.Text =
+            "Preferências salvas neste computador. Este firmware ainda não confirmou a interface de configuração remota.";
+        SelectedCameraText.Text = $"{binding.DisplayName}: recursos inteligentes salvos; envio não confirmado pelo firmware";
+        Log($"Controles inteligentes salvos localmente: dispositivo {binding.DeviceId}; envio remoto indisponível na ABI atual.");
     }
 
     private void OpenSeparateWindow_Click(object sender, RoutedEventArgs e)
@@ -2076,6 +2296,7 @@ public partial class MainWindow : Window
         if (focusedPreviewWindow == window)
         {
             RestoreConfiguredVideoGrid();
+            ScheduleLayoutRestore();
             SelectPreviewWindow(window);
             return;
         }
@@ -2179,6 +2400,7 @@ public partial class MainWindow : Window
         UpdateLayoutButtonSelection(slots);
 
         SetCameraBusy(true);
+        gridOpening = true;
         try
         {
             await DisconnectVideoAsync(log: false);
@@ -2364,6 +2586,8 @@ public partial class MainWindow : Window
         }
         finally
         {
+            gridOpening = false;
+            ScheduleLayoutRestore();
             SetCameraBusy(false);
         }
     }
@@ -3839,6 +4063,7 @@ public partial class MainWindow : Window
         if (!preferencesReady)
             return;
         preferences.DefaultSd = SubstreamBox.IsChecked == true;
+        UpdateStreamQualityButtons();
         DefaultQualityBox.SelectedIndex = preferences.DefaultSd ? 0 : 1;
         if (selectedPreviewWindow >= 0 &&
             previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? preferredBinding))
@@ -3856,6 +4081,35 @@ public partial class MainWindow : Window
         if (selectedPreviewWindow >= 0 &&
             previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
             await SwitchSelectedPreviewStreamAsync(selected);
+    }
+
+    private void StreamQuality_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element)
+            return;
+        bool useSd = string.Equals(element.Tag?.ToString(), "SD", StringComparison.OrdinalIgnoreCase);
+        if (SubstreamBox.IsChecked == useSd)
+        {
+            UpdateStreamQualityButtons();
+            return;
+        }
+        SubstreamBox.IsChecked = useSd;
+        DefaultStreamChanged_Click(SubstreamBox, new RoutedEventArgs());
+    }
+
+    private void UpdateStreamQualityButtons()
+    {
+        bool sd = SubstreamBox.IsChecked == true;
+        System.Windows.Media.Brush active = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(22, 119, 255));
+        System.Windows.Media.Brush inactive = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(23, 42, 66));
+        if (SdButton is null || HdButton is null)
+            return;
+        SdButton.Background = sd ? active : inactive;
+        HdButton.Background = sd ? inactive : active;
+        SdButton.Foreground = sd ? System.Windows.Media.Brushes.White : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188));
+        HdButton.Foreground = sd ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188)) : System.Windows.Media.Brushes.White;
     }
 
     private async Task SwitchSelectedPreviewStreamAsync(PreviewBinding binding)
@@ -4113,7 +4367,6 @@ public partial class MainWindow : Window
             .Distinct()
             .ToArray();
         StopPtzCommand();
-        PtzPopup.IsOpen = false;
         StopActiveTalk();
         if (soundingPreviewWindow >= 0)
         {
@@ -4158,7 +4411,8 @@ public partial class MainWindow : Window
         RecordButton.Content = "⏺  Gravar";
         CaptureButton.IsEnabled = false;
         TalkButton.IsEnabled = false;
-        PtzButton.IsEnabled = false;
+        PtzSidePanel.IsEnabled = false;
+        PtzCameraText.Text = "Selecione uma câmera";
         SeparateWindowButton.IsEnabled = false;
         if (log) Log("Vídeo desconectado.");
     }
@@ -4386,7 +4640,7 @@ public partial class MainWindow : Window
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
         bool needsUiUpdate =
-            type == CmsSdk.MessageType.VideoWindowControl && p1 is 0 or 27 ||
+            type == CmsSdk.MessageType.VideoWindowControl && p1 is 0 or 7 or 27 ||
             type == CmsSdk.MessageType.DeviceControl && p1 is 3 or 4 ||
             shouldRecoverDevice || shouldRecoverReturnedDevice || shouldRecoverPreview;
         if (!needsUiUpdate)
@@ -4396,6 +4650,8 @@ public partial class MainWindow : Window
             if (type == CmsSdk.MessageType.VideoWindowControl &&
                 p1 is 0 or 27 && p4 >= 0 && p4 < videoLabels.Count)
                 videoLabels[p4].BringToFront();
+            if (type == CmsSdk.MessageType.VideoWindowControl && p1 == 7 && !gridOpening)
+                ScheduleLayoutRestore();
             if (type == CmsSdk.MessageType.DeviceControl && p1 == 4)
             {
                 foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
@@ -4438,6 +4694,8 @@ public partial class MainWindow : Window
     {
         isClosing = true;
         onlineRefreshTimer.Stop();
+        layoutRestoreTimer.Stop();
+        cameraHoverTimer.Stop();
         recordingPlaybackTimer.Stop();
         recordingThumbnailCts?.Cancel();
         recordingPlayer.Dispose();

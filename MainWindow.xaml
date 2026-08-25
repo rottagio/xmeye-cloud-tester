@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         Title="iCSee/XMEye Monitor" Width="1440" Height="900"
-        MinWidth="1100" MinHeight="720" WindowStartupLocation="CenterScreen"
+        MinWidth="920" MinHeight="650" WindowStartupLocation="CenterScreen"
         Background="#07111E">
   <Window.Resources>
     <SolidColorBrush x:Key="Panel" Color="#0D1928"/>
@@ -52,11 +52,20 @@
     <Style x:Key="NavButton" TargetType="Button">
       <Setter Property="HorizontalContentAlignment" Value="Left"/>
       <Setter Property="Height" Value="54"/>
-      <Setter Property="Margin" Value="10,4"/>
+      <Setter Property="Margin" Value="16,6"/>
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="Background" Value="#0E1C2C"/>
       <Setter Property="Foreground" Value="#DCE8F7"/>
       <Setter Property="FontSize" Value="15"/>
+    </Style>
+    <Style x:Key="ToolButton" TargetType="Button">
+      <Setter Property="Margin" Value="3"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="MinWidth" Value="42"/>
+    </Style>
+    <Style x:Key="QualityButton" TargetType="Button" BasedOn="{StaticResource ToolButton}">
+      <Setter Property="MinWidth" Value="48"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <Style x:Key="PrimaryButton" TargetType="Button">
       <Setter Property="Background" Value="#1677FF"/>
@@ -86,7 +95,7 @@
 
   <Grid x:Name="RootGrid">
     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="205"/>
+      <ColumnDefinition Width="220"/>
       <ColumnDefinition Width="*"/>
     </Grid.ColumnDefinitions>
 
@@ -148,16 +157,19 @@
               <Button Content="▦ 9" Tag="9" Margin="3" IsEnabled="False" Click="GridLayout_Click" Background="#1677FF"/>
               <Button Content="▦ 16" Tag="16" Margin="3" IsEnabled="False" Click="GridLayout_Click"/>
             </UniformGrid>
-            <Button Content="⛶" FontSize="20" Margin="12,0,0,0" Padding="12,6" ToolTip="Tela cheia" Click="ToggleFullscreen_Click"/>
           </StackPanel>
         </Grid>
       </Border>
 
       <Grid Grid.Row="1">
         <Grid x:Name="LiveView" Margin="16">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" MinWidth="420"/>
+            <ColumnDefinition Width="220"/>
+          </Grid.ColumnDefinitions>
           <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="66"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <Border Background="Black" BorderBrush="#263A50" BorderThickness="1" CornerRadius="6" ClipToBounds="True">
             <Grid>
@@ -168,61 +180,104 @@
               </StackPanel>
             </Grid>
           </Border>
-          <Border Grid.Row="1" Background="#0D1A29" BorderBrush="#1B2D42" BorderThickness="1,0,0,0" Padding="18,10">
-            <Grid>
-              <StackPanel Orientation="Horizontal">
-                <Button x:Name="AudioButton" Content="🔊  Áudio" IsEnabled="False"
-                        ToolTip="Ouvir ou silenciar a câmera selecionada" Click="ToggleAudio_Click" Margin="0,0,8,0"/>
-                <Button x:Name="CaptureButton" Content="📷  Capturar" IsEnabled="False"
-                        ToolTip="Salvar uma foto da câmera selecionada" Click="CaptureSelected_Click" Margin="0,0,8,0"/>
-                <Button x:Name="RecordButton" Content="⏺  Gravar" IsEnabled="False"
-                        ToolTip="Gravar a câmera selecionada neste computador" Click="ToggleRecord_Click" Margin="0,0,8,0"/>
-                <Button x:Name="TalkButton" Content="🎙  Falar" IsEnabled="False"
-                        ToolTip="Falar pela câmera selecionada" Click="ToggleTalk_Click" Margin="0,0,8,0"/>
-                <Button x:Name="PtzButton" Content="✥  PTZ / Zoom" IsEnabled="False"
-                        ToolTip="Movimento, zoom óptico e orientação" Click="TogglePtzPopup_Click" Margin="0,0,8,0"/>
-                <Button x:Name="SeparateWindowButton" Content="▣  Janela" IsEnabled="False"
-                        ToolTip="Abrir a câmera selecionada numa janela separada" Click="OpenSeparateWindow_Click" Margin="0,0,8,0"/>
-                <Button Content="↻  Reconectar" Click="ReconnectAll_Click" Margin="8,0"/>
-                <TextBlock x:Name="SelectedCameraText" Text="Nenhuma câmera selecionada" Foreground="#8EA2BC"
-                           VerticalAlignment="Center" Margin="14,0,0,0"/>
-              </StackPanel>
-              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button x:Name="DisconnectButton" Content="Desconectar" IsEnabled="False" Click="Disconnect_Click" Margin="0,0,10,0"/>
-                <TextBlock Text="Qualidade" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <CheckBox x:Name="SubstreamBox" Content="SD" IsChecked="True" Foreground="#4EA1FF" FontWeight="SemiBold"
-                          VerticalAlignment="Center" Click="DefaultStreamChanged_Click"/>
-              </StackPanel>
-            </Grid>
+          <Border Grid.Row="1" Background="#0D1A29" BorderBrush="#1B2D42" BorderThickness="1,0,0,0" Padding="10,7">
+            <DockPanel LastChildFill="True">
+              <TextBlock x:Name="SelectedCameraText" DockPanel.Dock="Top" Text="Nenhuma câmera selecionada"
+                         Foreground="#8EA2BC" Margin="5,0,5,4" TextTrimming="CharacterEllipsis"/>
+              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <WrapPanel>
+                  <Border BorderBrush="#29415D" BorderThickness="0,0,1,0" Margin="0,0,5,0">
+                    <WrapPanel>
+                      <Button x:Name="AudioButton" Style="{StaticResource ToolButton}" Content="🔊 Ouvir" IsEnabled="False" Click="ToggleAudio_Click"/>
+                      <Button x:Name="TalkButton" Style="{StaticResource ToolButton}" Content="🎙 Falar" IsEnabled="False" Click="ToggleTalk_Click"/>
+                    </WrapPanel>
+                  </Border>
+                  <Border BorderBrush="#29415D" BorderThickness="0,0,1,0" Margin="0,0,5,0">
+                    <WrapPanel>
+                      <Button x:Name="CaptureButton" Style="{StaticResource ToolButton}" Content="📷 Foto" IsEnabled="False" Click="CaptureSelected_Click"/>
+                      <Button x:Name="RecordButton" Style="{StaticResource ToolButton}" Content="⏺ Gravar" IsEnabled="False" Click="ToggleRecord_Click"/>
+                    </WrapPanel>
+                  </Border>
+                  <Border BorderBrush="#29415D" BorderThickness="0,0,1,0" Margin="0,0,5,0">
+                    <WrapPanel>
+                      <Button x:Name="SeparateWindowButton" Style="{StaticResource ToolButton}" Content="▣ Janela" IsEnabled="False" Click="OpenSeparateWindow_Click"/>
+                      <Button Style="{StaticResource ToolButton}" Content="⛶ Tela cheia" Click="ToggleFullscreen_Click"/>
+                    </WrapPanel>
+                  </Border>
+                  <Border BorderBrush="#29415D" BorderThickness="0,0,1,0" Margin="0,0,5,0">
+                    <WrapPanel>
+                      <Button Style="{StaticResource ToolButton}" Content="↻ Reconectar" Click="ReconnectAll_Click"/>
+                      <Button x:Name="DisconnectButton" Style="{StaticResource ToolButton}" Content="Desconectar" IsEnabled="False" Click="Disconnect_Click"/>
+                    </WrapPanel>
+                  </Border>
+                  <WrapPanel>
+                    <Button x:Name="SdButton" Style="{StaticResource QualityButton}" Content="SD" Tag="SD" Click="StreamQuality_Click"/>
+                    <Button x:Name="HdButton" Style="{StaticResource QualityButton}" Content="HD" Tag="HD" Click="StreamQuality_Click"/>
+                    <CheckBox x:Name="SubstreamBox" Visibility="Collapsed" IsChecked="True" Click="DefaultStreamChanged_Click"/>
+                  </WrapPanel>
+                </WrapPanel>
+              </ScrollViewer>
+            </DockPanel>
           </Border>
-          <Popup x:Name="PtzPopup" Grid.RowSpan="2" PlacementTarget="{Binding ElementName=PtzButton}"
-                 Placement="Top" StaysOpen="False" AllowsTransparency="True">
-            <Border Background="#12243A" BorderBrush="#416487" BorderThickness="1" CornerRadius="8" Padding="10">
-              <StackPanel>
-                <TextBlock Text="PTZ e zoom" Foreground="White" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,7"/>
+
+          <Border x:Name="PtzSidePanel" Grid.Column="1" Grid.RowSpan="2" Margin="10,0,0,0"
+                  Background="#0D1A29" BorderBrush="#29415D" BorderThickness="1" CornerRadius="7">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel Margin="12">
+                <TextBlock Text="PTZ E CONTROLES" Foreground="#8EBBEE" FontWeight="SemiBold" FontSize="13"/>
+                <TextBlock x:Name="PtzCameraText" Text="Selecione uma câmera" Foreground="#8EA2BC"
+                           TextWrapping="Wrap" Margin="0,3,0,10"/>
                 <UniformGrid Columns="3" Rows="3">
-                  <Border/>
-                  <Button Content="▲" Tag="0" Padding="12,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Border/>
-                  <Button Content="◀" Tag="3" Padding="12,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Button Content="●" Tag="20" Padding="12,7" Click="PtzOneShot_Click" ToolTip="Centralizar/reiniciar movimento"/>
-                  <Button Content="▶" Tag="4" Padding="12,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Border/>
-                  <Button Content="▼" Tag="2" Padding="12,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Border/>
+                  <Border/><Button Content="▲" Tag="0" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/><Border/>
+                  <Button Content="◀" Tag="2" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
+                  <Button Content="◎" Tag="35" Style="{StaticResource ToolButton}" Click="PtzOneShot_Click" ToolTip="Reiniciar posição PTZ"/>
+                  <Button Content="▶" Tag="3" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
+                  <Border/><Button Content="▼" Tag="1" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/><Border/>
                 </UniformGrid>
-                <UniformGrid Columns="3" Margin="0,8,0,0">
-                  <Button Content="− Zoom" Tag="9" Padding="9,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Button Content="+ Zoom" Tag="10" Padding="9,7" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
-                  <Button Content="↕ Girar" Tag="38" Padding="9,7" Click="PtzOneShot_Click" ToolTip="Girar a imagem em câmeras compatíveis"/>
+                <UniformGrid Columns="2" Margin="0,7,0,0">
+                  <Button Content="− Zoom" Tag="8" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
+                  <Button Content="+ Zoom" Tag="9" Style="{StaticResource ToolButton}" PreviewMouseLeftButtonDown="PtzCommand_Down" PreviewMouseLeftButtonUp="PtzCommand_Up" MouseLeave="PtzCommand_Leave"/>
                 </UniformGrid>
-                <Button Content="⇄ Espelhar exibição" Padding="9,7" Margin="0,8,0,0"
-                        Click="ToggleMirrorDisplay_Click"
-                        ToolTip="Espelha somente a imagem exibida neste computador"/>
-                <TextBlock Text="Segure para mover ou aplicar zoom." Foreground="#8EA2BC" FontSize="11" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                <UniformGrid Columns="2" Margin="0,5,0,0">
+                  <Button Content="↕ Girar" Tag="34" Style="{StaticResource ToolButton}" Click="PtzOneShot_Click"/>
+                  <Button Content="⇄ Espelhar" Style="{StaticResource ToolButton}" Click="ToggleMirrorDisplay_Click"/>
+                </UniformGrid>
+
+                <Separator Margin="0,10" Background="#29415D"/>
+                <TextBlock Text="POSIÇÕES FAVORITAS" Foreground="#8EBBEE" FontWeight="SemiBold" FontSize="12"/>
+                <ComboBox x:Name="PtzPresetBox" SelectedIndex="0" Margin="0,6,0,5">
+                  <ComboBoxItem Content="Posição 1" Tag="1"/><ComboBoxItem Content="Posição 2" Tag="2"/>
+                  <ComboBoxItem Content="Posição 3" Tag="3"/><ComboBoxItem Content="Posição 4" Tag="4"/>
+                  <ComboBoxItem Content="Posição 5" Tag="5"/><ComboBoxItem Content="Posição 6" Tag="6"/>
+                </ComboBox>
+                <UniformGrid Columns="2"><Button Content="Ir" Click="PtzPresetGo_Click" Margin="2"/><Button Content="Salvar" Click="PtzPresetSave_Click" Margin="2"/></UniformGrid>
+
+                <Separator Margin="0,10" Background="#29415D"/>
+                <TextBlock Text="DETECÇÃO E ALERTAS" Foreground="#8EBBEE" FontWeight="SemiBold" FontSize="12"/>
+                <CheckBox x:Name="MotionTrackingBox" Content="Rastreamento de movimento" Foreground="#EAF1FA" Margin="0,7,0,3"/>
+                <TextBlock Text="Sensibilidade" Foreground="#8EA2BC"/><Slider x:Name="MotionSensitivitySlider" Minimum="1" Maximum="6" Value="3" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                <TextBlock Text="Tempo de acompanhamento" Foreground="#8EA2BC" Margin="0,5,0,2"/>
+                <ComboBox x:Name="TrackingTimeBox" SelectedIndex="1"><ComboBoxItem Content="5 segundos" Tag="5"/><ComboBoxItem Content="15 segundos" Tag="15"/><ComboBoxItem Content="30 segundos" Tag="30"/></ComboBox>
+                <TextBlock Text="Posição após rastrear" Foreground="#8EA2BC" Margin="0,5,0,2"/>
+                <ComboBox x:Name="TrackingPositionBox" SelectedIndex="0">
+                  <ComboBoxItem Content="Manter posição atual" Tag="0"/>
+                  <ComboBoxItem Content="Posição favorita 1" Tag="1"/><ComboBoxItem Content="Posição favorita 2" Tag="2"/>
+                  <ComboBoxItem Content="Posição favorita 3" Tag="3"/><ComboBoxItem Content="Posição favorita 4" Tag="4"/>
+                  <ComboBoxItem Content="Posição favorita 5" Tag="5"/><ComboBoxItem Content="Posição favorita 6" Tag="6"/>
+                </ComboBox>
+                <CheckBox x:Name="HumanDetectionBox" Content="Detecção de corpo/pessoa" Foreground="#EAF1FA" Margin="0,7,0,2"/>
+                <CheckBox x:Name="SmartAlertBox" Content="Alerta inteligente" Foreground="#EAF1FA" Margin="0,2"/>
+                <CheckBox x:Name="TraceBox" Content="Exibir rastros" Foreground="#EAF1FA" Margin="0,2"/>
+                <CheckBox x:Name="AudibleWarningBox" Content="Aviso sonoro" Foreground="#EAF1FA" Margin="0,2"/>
+                <CheckBox x:Name="LightWarningBox" Content="Aviso luminoso" Foreground="#EAF1FA" Margin="0,2"/>
+                <TextBlock Text="Mensagem de disparo" Foreground="#8EA2BC" Margin="0,6,0,2"/>
+                <TextBox x:Name="TriggerMessageBox" Text="Movimento detectado" MaxLength="80"/>
+                <Button Content="Aplicar na câmera" Margin="0,8,0,0" Click="ApplySmartControls_Click"/>
+                <TextBlock x:Name="SmartControlStatusText" Foreground="#8EA2BC" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"
+                           Text="Os recursos disponíveis dependem do modelo da câmera."/>
               </StackPanel>
-            </Border>
-          </Popup>
+            </ScrollViewer>
+          </Border>
         </Grid>
 
         <Grid x:Name="CamerasView" Visibility="Collapsed" Margin="22">

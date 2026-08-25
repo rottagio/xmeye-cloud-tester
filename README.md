@@ -15,6 +15,13 @@ motor CMS/Cloud P2P da Xiongmai.
 - qualidade SD/HD por câmera e indicação P2P ou rede local;
 - áudio, fala, PTZ/zoom, captura, gravação local, rotação, espelhamento local e
   janela separada, conforme o recurso suportado pelo dispositivo;
+- painel PTZ fixo com direções corrigidas, posições favoritas e controles rápidos
+  sobre cada vídeo;
+- barra responsiva com ações agrupadas e botões SD/HD, inclusive em janelas
+  menores;
+- preferências por câmera para rastreamento, sensibilidade, tempo/posição,
+  detecção de pessoa, rastros e avisos. O envio remoto só é confirmado quando o
+  firmware expõe uma interface compatível;
 - biblioteca separada de vídeos e imagens, com miniaturas, reprodutor e exclusão
   recuperável pela Lixeira;
 - grupos/ambientes, apelidos locais, ordem, ocultação e serial mascarado;
