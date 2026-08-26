@@ -7,6 +7,7 @@ namespace XMEyeCloudTester;
 
 public partial class App : System.Windows.Application
 {
+    private const string AppUserModelId = "RottaGio.XMEyeCloudTester.Monitor";
     private Mutex? singleInstanceMutex;
     private bool restartAfterLogout;
 
@@ -26,8 +27,16 @@ public partial class App : System.Windows.Application
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetDllDirectory(string path);
 
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        // Give the monitor its own stable Windows identity. Without an explicit
+        // identity, the taskbar can retain the launcher's old cached icon even
+        // after both executables have been replaced by the updater.
+        _ = SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+
         singleInstanceMutex = new Mutex(
             initiallyOwned: true, "Local\\XMEyeCloudTester.SingleInstance", out bool createdNew);
         if (!createdNew)

@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
@@ -26,6 +27,9 @@ public partial class MainWindow : Window
         internal const uint SwpNoMove = 0x0002;
         internal const uint SwpNoZOrder = 0x0004;
         internal const uint SwpFrameChanged = 0x0020;
+        internal const uint WmSetIcon = 0x0080;
+        internal const int IconSmall = 0;
+        internal const int IconBig = 1;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern bool SetDllDirectory(string path);
@@ -39,7 +43,18 @@ public partial class MainWindow : Window
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool SetWindowPos(
             IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        internal static extern IntPtr SendMessage(
+            IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DestroyIcon(IntPtr icon);
     }
+
+    private IntPtr nativeLargeIcon;
+    private IntPtr nativeSmallIcon;
 
     private sealed class CameraHeaderLabel : Forms.Label
     {
@@ -412,6 +427,8 @@ public partial class MainWindow : Window
         File.WriteAllText(diagnosticPath, string.Empty);
         sdkCallback = OnSdkMessage;
         InitializeComponent();
+        SourceInitialized += ApplyNativeWindowIcon;
+        Closed += (_, _) => ReleaseNativeWindowIcons();
         if (controlledRequestTest)
             preferences.AutoReconnect = false;
         RestoreLayoutBox.IsChecked = preferences.RestoreLastLayout;
@@ -1683,6 +1700,73 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement element &&
             int.TryParse(element.Tag?.ToString(), out int preset))
             SendPtzOneShot(19, preset, "abrir posição favorita");
+    }
+
+    private void ApplyNativeWindowIcon(object? sender, EventArgs e)
+    {
+        // WPF already receives the icon through XAML. Re-send its native handles
+        // so Windows refreshes both the title-bar and taskbar representations.
+        var helper = new WindowInteropHelper(this);
+        if (helper.Handle == IntPtr.Zero || Icon is null)
+            return;
+
+        ReleaseNativeWindowIcons();
+        nativeLargeIcon = CreateIconHandle(Icon, 32, 32);
+        nativeSmallIcon = CreateIconHandle(Icon, 16, 16);
+        _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
+            (IntPtr)NativeMethods.IconBig, nativeLargeIcon);
+        _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
+            (IntPtr)NativeMethods.IconSmall, nativeSmallIcon);
+    }
+
+    private static IntPtr CreateIconHandle(
+        System.Windows.Media.ImageSource source, int width, int height)
+    {
+        using var bitmap = BitmapFromSource(source, width, height);
+        return bitmap.GetHicon();
+    }
+
+    private void ReleaseNativeWindowIcons()
+    {
+        if (nativeLargeIcon != IntPtr.Zero)
+        {
+            _ = NativeMethods.DestroyIcon(nativeLargeIcon);
+            nativeLargeIcon = IntPtr.Zero;
+        }
+        if (nativeSmallIcon != IntPtr.Zero)
+        {
+            _ = NativeMethods.DestroyIcon(nativeSmallIcon);
+            nativeSmallIcon = IntPtr.Zero;
+        }
+    }
+
+    private static System.Drawing.Bitmap BitmapFromSource(
+        System.Windows.Media.ImageSource source, int width = 0, int height = 0)
+    {
+        var bitmapSource = (BitmapSource)source;
+        int targetWidth = width > 0 ? width : bitmapSource.PixelWidth;
+        int targetHeight = height > 0 ? height : bitmapSource.PixelHeight;
+        var bitmap = new System.Drawing.Bitmap(
+            targetWidth, targetHeight, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        var data = bitmap.LockBits(
+            new System.Drawing.Rectangle(0, 0, targetWidth, targetHeight),
+            System.Drawing.Imaging.ImageLockMode.WriteOnly, bitmap.PixelFormat);
+        try
+        {
+            var scaled = new TransformedBitmap(bitmapSource,
+                new System.Windows.Media.ScaleTransform(
+                    (double)targetWidth / bitmapSource.PixelWidth,
+                    (double)targetHeight / bitmapSource.PixelHeight));
+            var converted = new FormatConvertedBitmap(
+                scaled, System.Windows.Media.PixelFormats.Pbgra32, null, 0);
+            converted.CopyPixels(
+                Int32Rect.Empty, data.Scan0, data.Stride * targetHeight, data.Stride);
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+        return bitmap;
     }
 
     private void PtzPresetQuick_RightClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
