@@ -346,6 +346,7 @@ public partial class MainWindow : Window
 
     private sealed class DeviceCompatibilityRow
     {
+        public required string DeviceKey { get; init; }
         public required string Camera { get; init; }
         public required string Identifier { get; init; }
         public required string Model { get; init; }
@@ -1499,8 +1500,6 @@ public partial class MainWindow : Window
         }
         SelectedCameraText.Text = $"{binding.DisplayName} — Canal {binding.Channel + 1}";
         bool online = confirmedPreviewWindows.ContainsKey(window);
-        if (online)
-            EnsurePtzCapabilityRequested(binding.DeviceId);
         CaptureButton.IsEnabled = online;
         AudioButton.IsEnabled = online;
         RecordButton.IsEnabled = online;
@@ -1744,9 +1743,20 @@ public partial class MainWindow : Window
             state.Requested = true;
         }
 
+        _ = RequestPtzCapabilitySequenceAsync(targetDeviceId);
+    }
+
+    private async Task RequestPtzCapabilitySequenceAsync(int targetDeviceId)
+    {
         InitializePtzLogCursor();
         RequestPtzConfig(targetDeviceId, SystemFunctionCommand,
             "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
+        // O VMS aceita ambas as leituras em sequência, mas não precisamos
+        // enviá-las na mesma rajada. A orientação só é solicitada depois da
+        // leitura principal e apenas se a proteção ainda permitir.
+        await Task.Delay(800);
+        if (isClosing || !CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+            return;
         RequestPtzConfig(targetDeviceId, PtzControlConfigCommand,
             "{\"Name\":\"Uart.PTZControlCmd\",\"SessionID\":\"0x08\"}");
     }
@@ -4741,7 +4751,7 @@ public partial class MainWindow : Window
         }
         AddColumn(table, "Câmera", nameof(DeviceCompatibilityRow.Camera), 130);
         AddColumn(table, "Identificador", nameof(DeviceCompatibilityRow.Identifier), 125);
-        AddColumn(table, "Modelo informado", nameof(DeviceCompatibilityRow.Model), 145);
+        AddColumn(table, "Tipo cloud", nameof(DeviceCompatibilityRow.Model), 120);
         AddColumn(table, "Firmware", nameof(DeviceCompatibilityRow.Firmware), 220);
         AddColumn(table, "Código interno", nameof(DeviceCompatibilityRow.InternalCode), 105);
         AddColumn(table, "Plataforma", nameof(DeviceCompatibilityRow.Platform), 170);
@@ -4756,6 +4766,7 @@ public partial class MainWindow : Window
         var content = new Grid { Margin = new Thickness(20) };
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var heading = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
         heading.Children.Add(new TextBlock
         {
@@ -4775,6 +4786,93 @@ public partial class MainWindow : Window
         content.Children.Add(heading);
         Grid.SetRow(table, 1);
         content.Children.Add(table);
+
+        var identifyButton = new System.Windows.Controls.Button
+        {
+            Content = "Identificar selecionada",
+            Margin = new Thickness(0, 12, 12, 0),
+            Padding = new Thickness(16, 8, 16, 8),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+        };
+        var identifyStatus = new TextBlock
+        {
+            Text = "Selecione uma câmera online. A leitura será feita somente por clique e ficará em cache.",
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+        var footer = new DockPanel();
+        footer.Children.Add(identifyButton);
+        DockPanel.SetDock(identifyButton, Dock.Left);
+        footer.Children.Add(identifyStatus);
+        Grid.SetRow(footer, 2);
+        content.Children.Add(footer);
+
+        identifyButton.Click += async (_, _) =>
+        {
+            if (table.SelectedItem is not DeviceCompatibilityRow selectedRow)
+            {
+                identifyStatus.Text = "Selecione uma câmera na tabela.";
+                return;
+            }
+            CloudApi.AccountDevice? selectedDevice = accountDevices.FirstOrDefault(device =>
+                string.Equals(device.CloudId, selectedRow.DeviceKey, StringComparison.Ordinal));
+            PreviewBinding? onlineBinding = previewBindings.Values.FirstOrDefault(binding =>
+                string.Equals(binding.CloudId, selectedRow.DeviceKey, StringComparison.Ordinal) &&
+                confirmedPreviewWindows.ContainsKey(binding.Window));
+            if (selectedDevice is null || onlineBinding is null)
+            {
+                identifyStatus.Text = "Essa câmera não possui imagem online confirmada agora. Nenhuma consulta foi enviada.";
+                return;
+            }
+            if (!CanIssueDeviceRequest(
+                    onlineBinding.DeviceId, out TimeSpan wait, out bool blocked, out int lastError))
+            {
+                identifyStatus.Text = blocked
+                    ? $"Câmera em quarentena; aguarde {Math.Ceiling(wait.TotalMinutes)} min."
+                    : $"Leitura protegida após erro {lastError}; aguarde {Math.Ceiling(wait.TotalMinutes)} min.";
+                return;
+            }
+            if (deviceProfiles.TryGetCurrentCapability(
+                    selectedRow.DeviceKey, "SupportPTZDirectionControl", out _))
+            {
+                identifyStatus.Text = "Identificação atual já disponível no cache; nenhuma consulta foi enviada.";
+                return;
+            }
+            if (ptzCapabilities.TryGetValue(
+                    onlineBinding.DeviceId, out PtzCapabilityState? existingState))
+            {
+                lock (existingState)
+                {
+                    if (existingState.Requested)
+                    {
+                        identifyStatus.Text = "A identificação já foi solicitada nesta sessão. Aguarde a resposta do dispositivo.";
+                        return;
+                    }
+                }
+            }
+
+            identifyButton.IsEnabled = false;
+            identifyStatus.Text = "Identificando uma câmera: duas leituras protegidas e serializadas...";
+            EnsurePtzCapabilityRequested(onlineBinding.DeviceId);
+            await Task.Delay(3500);
+            RefreshDeviceProfilesFromKnownData();
+            string selectedKey = selectedRow.DeviceKey;
+            DeviceCompatibilityRow[] refreshedRows = accountDevices.Select(BuildCompatibilityRow).ToArray();
+            table.ItemsSource = refreshedRows;
+            table.SelectedItem = refreshedRows.FirstOrDefault(row =>
+                string.Equals(row.DeviceKey, selectedKey, StringComparison.Ordinal));
+            int evidenceCount = deviceProfiles.Devices.TryGetValue(
+                selectedKey, out DeviceProfileStore.Profile? refreshedProfile)
+                ? refreshedProfile.Capabilities.Count
+                : 0;
+            identifyStatus.Text = evidenceCount > 0
+                ? $"Identificação concluída e salva no cache: {evidenceCount} evidência(s)."
+                : "O dispositivo não devolveu capacidades identificáveis. Não haverá repetição automática.";
+            identifyButton.IsEnabled = true;
+        };
 
         var dialog = new Window
         {
@@ -4815,6 +4913,7 @@ public partial class MainWindow : Window
             (entry.ChannelCountOverride is 1 or 2 ? entry.ChannelCountOverride : entry.DetectedChannelCount);
         return new DeviceCompatibilityRow
         {
+            DeviceKey = device.CloudId,
             Camera = string.IsNullOrWhiteSpace(device.Alias) ? "Câmera" : device.Alias,
             Identifier = device.MaskedCloudId,
             Model = profile?.ReportedModel.Length > 0 ? profile.ReportedModel : "Não informado",
