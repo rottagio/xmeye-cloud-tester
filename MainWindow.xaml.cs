@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -221,9 +222,22 @@ public partial class MainWindow : Window
     private static readonly TimeSpan CapabilityDiscoverySpacing = TimeSpan.FromSeconds(5);
     private const int SystemFunctionCommand = 1360;
     private const int PtzControlConfigCommand = 0x175;
+    private const int StorageInfoCommand = 0x22;
+    private const int RecordStorageTypeCommand = 0x7C;
+    private const int RecordConfigCommand = 0x17;
+    private const int CameraLightConfigCommand = 0x10415;
+    private const int StorageInfoSize = 5572;
+    private const int RecordStorageTypeSize = 4;
+    private const int RecordConfigSize = 1360;
+    private const int CameraLightConfigSize = 100;
     private const int DeviceConfigBufferSize = 64 * 1024;
     private readonly ConcurrentDictionary<int, PtzCapabilityState> ptzCapabilities = new();
     private readonly ConcurrentDictionary<(int DeviceId, int Command), IntPtr> pendingPtzConfigBuffers = new();
+    private readonly ConcurrentDictionary<(int DeviceId, int Command), PendingBinaryConfigRead> pendingBinaryConfigReads = new();
+    private readonly ConcurrentDictionary<int, byte> timedOutDetailedConfigDevices = new();
+    private readonly ConcurrentDictionary<(string DeviceKey, string Section, int Channel), byte> attemptedDetailedConfigReads = new();
+    private readonly SemaphoreSlim detailedConfigReadGate = new(1, 1);
+    private readonly SemaphoreSlim deviceConfigIoGate = new(1, 1);
     private readonly object ptzLogLock = new();
     private long ptzLogOffset = -1;
     private string ptzLogRemainder = string.Empty;
@@ -254,6 +268,7 @@ public partial class MainWindow : Window
     private readonly AppPreferences preferences = AppPreferences.Load();
     private readonly CameraCatalogStore cameraCatalog = CameraCatalogStore.Load();
     private readonly DeviceProfileStore deviceProfiles = DeviceProfileStore.Load();
+    private readonly DeviceReadOnlyConfigStore readOnlyDeviceConfigs = DeviceReadOnlyConfigStore.Load();
     private bool preferencesReady;
     private int currentLayoutSlots = 1;
     private int selectedPreviewWindow = -1;
@@ -327,6 +342,13 @@ public partial class MainWindow : Window
     {
         internal bool? DeviceSupportsPtz;
         internal readonly Dictionary<int, (bool Mirror, bool Flip)> Channels = [];
+    }
+
+    private sealed class PendingBinaryConfigRead
+    {
+        internal required IntPtr Buffer;
+        internal required int Size;
+        internal required TaskCompletionSource<byte[]?> Completion;
     }
 
     private sealed class LocalMediaItem : INotifyPropertyChanged
@@ -1762,11 +1784,19 @@ public partial class MainWindow : Window
                 // One inventory read per device/firmware, only after video is
                 // confirmed. There is no automatic retry in the same session.
                 attemptedCapabilityDiscovery[queued.CloudId] = 0;
-                InitializePtzLogCursor();
-                RequestPtzConfig(online.DeviceId, SystemFunctionCommand,
-                    "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
-                Log($"Identificacao automatica enviada uma vez apos a primeira imagem: dispositivo {online.DeviceId}.");
-                await Task.Delay(CapabilityDiscoverySpacing).ConfigureAwait(false);
+                await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    InitializePtzLogCursor();
+                    RequestPtzConfig(online.DeviceId, SystemFunctionCommand,
+                        "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
+                    Log($"Identificacao automatica enviada uma vez apos a primeira imagem: dispositivo {online.DeviceId}.");
+                    await Task.Delay(CapabilityDiscoverySpacing).ConfigureAwait(false);
+                }
+                finally
+                {
+                    deviceConfigIoGate.Release();
+                }
             }
         }
         finally
@@ -3231,6 +3261,312 @@ public partial class MainWindow : Window
             gridLayoutWorkerRunning = true;
             gridLayoutWorker = ProcessQueuedGridLayoutsAsync();
             return gridLayoutWorker;
+        }
+    }
+
+    private async Task<byte[]?> RequestBinaryDeviceConfigAsync(
+        int targetDeviceId, int channel, int command, int bufferSize)
+    {
+        var key = (targetDeviceId, command);
+        if (pendingBinaryConfigReads.ContainsKey(key))
+            return null;
+
+        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+        Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
+        var completion = new TaskCompletionSource<byte[]?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new PendingBinaryConfigRead
+        {
+            Buffer = buffer,
+            Size = bufferSize,
+            Completion = completion
+        };
+        if (!pendingBinaryConfigReads.TryAdd(key, pending))
+        {
+            Marshal.FreeHGlobal(buffer);
+            return null;
+        }
+
+        try
+        {
+            int result = CmsSdk.CMS_Client_GetDeviceConfig(
+                targetDeviceId, channel, command, buffer, bufferSize, -1);
+            if (result < 0 && pendingBinaryConfigReads.TryRemove(key, out PendingBinaryConfigRead? rejected))
+            {
+                RecordDeviceRequestResult(targetDeviceId, result);
+                Marshal.FreeHGlobal(rejected.Buffer);
+                rejected.Completion.TrySetResult(null);
+            }
+        }
+        catch
+        {
+            if (pendingBinaryConfigReads.TryRemove(key, out PendingBinaryConfigRead? rejected))
+            {
+                Marshal.FreeHGlobal(rejected.Buffer);
+                rejected.Completion.TrySetResult(null);
+            }
+        }
+
+        Task completed = await Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromSeconds(20)))
+            .ConfigureAwait(false);
+        // Em timeout o buffer permanece vivo: o SDK ainda pode escrever nele. O
+        // callback tardio ou o fechamento do aplicativo faz a liberacao segura.
+        if (completed == completion.Task)
+            return await completion.Task.ConfigureAwait(false);
+        timedOutDetailedConfigDevices[targetDeviceId] = 0;
+        return null;
+    }
+
+    private void HandleBinaryDeviceConfigResponse(int result, int targetDeviceId, int command)
+    {
+        var key = (targetDeviceId, command);
+        if (!pendingBinaryConfigReads.TryRemove(key, out PendingBinaryConfigRead? pending))
+            return;
+        if (result >= 0)
+            timedOutDetailedConfigDevices.TryRemove(targetDeviceId, out _);
+
+        byte[]? bytes = null;
+        try
+        {
+            if (result >= 0 && pending.Buffer != IntPtr.Zero)
+            {
+                bytes = new byte[pending.Size];
+                Marshal.Copy(pending.Buffer, bytes, 0, bytes.Length);
+            }
+        }
+        catch
+        {
+            bytes = null;
+        }
+        finally
+        {
+            if (pending.Buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(pending.Buffer);
+        }
+        pending.Completion.TrySetResult(bytes);
+    }
+
+    private async Task<byte[]?> ReadSerializedBinaryConfigAsync(
+        int targetDeviceId, int channel, int command, int bufferSize)
+    {
+        await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (timedOutDetailedConfigDevices.ContainsKey(targetDeviceId) ||
+                !CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+                return null;
+            return await RequestBinaryDeviceConfigAsync(
+                targetDeviceId, channel, command, bufferSize).ConfigureAwait(false);
+        }
+        finally
+        {
+            deviceConfigIoGate.Release();
+        }
+    }
+
+    private static DeviceReadOnlyConfigStore.StorageInfo? ParseStorageInfo(byte[] bytes)
+    {
+        if (bytes.Length < StorageInfoSize)
+            return null;
+        int diskCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(0, 4));
+        if (diskCount is < 0 or > 8)
+            return null;
+
+        var info = new DeviceReadOnlyConfigStore.StorageInfo
+        {
+            ObservedAtUtc = DateTime.UtcNow,
+            DiskCount = diskCount
+        };
+        for (int disk = 0; disk < diskCount; disk++)
+        {
+            int diskOffset = 4 + disk * 696;
+            int partitionCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(diskOffset + 4, 4));
+            if (partitionCount is < 0 or > 4)
+                return null;
+            for (int partition = 0; partition < partitionCount; partition++)
+            {
+                int offset = diskOffset + 56 + partition * 160;
+                uint total = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset + 8, 4));
+                uint free = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset + 12, 4));
+                if (total == 0 || free > total)
+                    continue;
+                string fileSystem = Encoding.ASCII.GetString(bytes, offset + 152, 8).TrimEnd('\0', ' ');
+                fileSystem = new string(fileSystem.Where(character => !char.IsControl(character)).ToArray());
+                info.Partitions.Add(new DeviceReadOnlyConfigStore.PartitionInfo
+                {
+                    TypeCode = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset, 4)),
+                    TotalMegabytes = total,
+                    FreeMegabytes = free,
+                    StatusCode = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset + 16, 4)),
+                    FileSystem = fileSystem
+                });
+            }
+        }
+        return info;
+    }
+
+    private static DeviceReadOnlyConfigStore.RecordingInfo? ParseRecordingInfo(
+        int channel, byte[] storageTarget, byte[] recordConfig)
+    {
+        if (storageTarget.Length < RecordStorageTypeSize || recordConfig.Length < RecordConfigSize)
+            return null;
+        int preRecord = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(0, 4));
+        int packetLength = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(8, 4));
+        int recordMode = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(12, 4));
+        if (preRecord is < 0 or > 3600 || packetLength is < 0 or > 1440 ||
+            recordMode is < -1 or > 100)
+            return null;
+
+        int enabledPeriods = 0;
+        for (int period = 0; period < 42; period++)
+        {
+            int offset = 16 + period * 28;
+            int enabled = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(offset, 4));
+            int start = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(offset + 4, 4));
+            int end = BinaryPrimitives.ReadInt32LittleEndian(recordConfig.AsSpan(offset + 8, 4));
+            if (enabled != 0 && start is >= 0 and <= 86400 && end is >= 0 and <= 86400)
+                enabledPeriods++;
+        }
+
+        return new DeviceReadOnlyConfigStore.RecordingInfo
+        {
+            ObservedAtUtc = DateTime.UtcNow,
+            Channel = channel,
+            PreRecordSeconds = preRecord,
+            Redundancy = recordConfig[4] != 0,
+            PacketLengthMinutes = packetLength,
+            RecordModeCode = recordMode,
+            UsesSata = storageTarget[0] != 0,
+            UsesUsb = storageTarget[1] != 0,
+            UsesSd = storageTarget[2] != 0,
+            UsesDvd = storageTarget[3] != 0,
+            EnabledSchedulePeriods = enabledPeriods
+        };
+    }
+
+    private static DeviceReadOnlyConfigStore.LightInfo? ParseCameraLightInfo(int channel, byte[] bytes)
+    {
+        if (bytes.Length < CameraLightConfigSize)
+            return null;
+        string mode = Encoding.ASCII.GetString(bytes, 0, 64).TrimEnd('\0', ' ');
+        mode = new string(mode.Where(character => !char.IsControl(character)).ToArray());
+        int duration = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(64, 4));
+        int level = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(68, 4));
+        int enabled = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(72, 4));
+        int start = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(76, 4));
+        int end = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(80, 4));
+        if (duration is < 0 or > 86400 || level is < 0 or > 100 ||
+            start is < 0 or > 86400 || end is < 0 or > 86400)
+            return null;
+        return new DeviceReadOnlyConfigStore.LightInfo
+        {
+            ObservedAtUtc = DateTime.UtcNow,
+            Channel = channel,
+            WorkMode = mode,
+            DurationSeconds = duration,
+            Level = level,
+            ScheduleEnabled = enabled != 0,
+            ScheduleStartSeconds = start,
+            ScheduleEndSeconds = end
+        };
+    }
+
+    private async Task<DeviceReadOnlyConfigStore.StorageInfo?> ReadStorageOnDemandAsync(
+        CloudApi.AccountDevice device, PreviewBinding online)
+    {
+        DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+        if (cached.Storage is not null)
+            return cached.Storage;
+        await detailedConfigReadGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (cached.Storage is not null)
+                return cached.Storage;
+            if (!attemptedDetailedConfigReads.TryAdd((device.CloudId, "Storage", -1), 0))
+                return null;
+            Log($"Leitura sob demanda enviada uma vez: armazenamento; dispositivo {online.DeviceId}.");
+            byte[]? bytes = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, -1, StorageInfoCommand, StorageInfoSize).ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.StorageInfo? parsed = bytes is null ? null : ParseStorageInfo(bytes);
+            if (parsed is null)
+                return null;
+            cached.Storage = parsed;
+            readOnlyDeviceConfigs.Save();
+            return parsed;
+        }
+        finally
+        {
+            detailedConfigReadGate.Release();
+        }
+    }
+
+    private async Task<DeviceReadOnlyConfigStore.RecordingInfo?> ReadRecordingOnDemandAsync(
+        CloudApi.AccountDevice device, PreviewBinding online)
+    {
+        DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+        if (cached.RecordingByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.RecordingInfo? saved))
+            return saved;
+        await detailedConfigReadGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (cached.RecordingByChannel.TryGetValue(online.Channel, out saved))
+                return saved;
+            if (!attemptedDetailedConfigReads.TryAdd((device.CloudId, "Recording", online.Channel), 0))
+                return null;
+            Log($"Leitura sob demanda enviada uma vez: gravacao; dispositivo {online.DeviceId}; canal {online.Channel}.");
+            byte[]? target = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, RecordStorageTypeCommand, RecordStorageTypeSize)
+                .ConfigureAwait(false);
+            if (target is null)
+                return null;
+            await Task.Delay(800).ConfigureAwait(false);
+            byte[]? config = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, RecordConfigCommand, RecordConfigSize)
+                .ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.RecordingInfo? parsed = config is null
+                ? null
+                : ParseRecordingInfo(online.Channel, target, config);
+            if (parsed is null)
+                return null;
+            cached.RecordingByChannel[online.Channel] = parsed;
+            readOnlyDeviceConfigs.Save();
+            return parsed;
+        }
+        finally
+        {
+            detailedConfigReadGate.Release();
+        }
+    }
+
+    private async Task<DeviceReadOnlyConfigStore.LightInfo?> ReadCameraLightOnDemandAsync(
+        CloudApi.AccountDevice device, PreviewBinding online)
+    {
+        DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+        if (cached.LightByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.LightInfo? saved))
+            return saved;
+        await detailedConfigReadGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (cached.LightByChannel.TryGetValue(online.Channel, out saved))
+                return saved;
+            if (!attemptedDetailedConfigReads.TryAdd((device.CloudId, "Light", online.Channel), 0))
+                return null;
+            Log($"Leitura sob demanda enviada uma vez: iluminacao; dispositivo {online.DeviceId}; canal {online.Channel}.");
+            byte[]? bytes = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, CameraLightConfigSize)
+                .ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.LightInfo? parsed = bytes is null
+                ? null
+                : ParseCameraLightInfo(online.Channel, bytes);
+            if (parsed is null)
+                return null;
+            cached.LightByChannel[online.Channel] = parsed;
+            readOnlyDeviceConfigs.Save();
+            return parsed;
+        }
+        finally
+        {
+            detailedConfigReadGate.Release();
         }
     }
 
@@ -4818,7 +5154,7 @@ public partial class MainWindow : Window
                 : evidence.Any(item => item.Supported) ? "Disponível" : "Não disponível";
         }
         string DetailedState(string support) => support == "Disponível"
-            ? "Será lida somente ao abrir esta seção"
+            ? "Compatibilidade identificada; detalhes ainda não lidos"
             : support;
         string Channels()
         {
@@ -4836,33 +5172,104 @@ public partial class MainWindow : Window
 
         string ptz = Capability("SupportPTZDirectionControl", "PTZ.Direction");
         string person = Capability("SupportHumanDetection");
-        string doubleLight = Capability("SupportDoubleLightCamera");
+        string doubleLight = Capability(
+            "SupportDoubleLightCamera", "SupportCameraWhiteLight", "SupportDoubleLightBulb");
         string sound = Capability("SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound");
-        DeviceSettingRow[] rows =
-        [
-            Row("Básicas", "Canais", Channels(), detailed: false),
-            Row("Básicas", "Modelo e firmware", profile?.Firmware.Length > 0 || profile?.ReportedModel.Length > 0
-                ? "Informado" : "Não informado pelo provedor", detailed: false),
-            Row("Vídeo e PTZ", "Movimento PTZ", ptz),
-            Row("Vídeo e PTZ", "Posições favoritas", Capability("SupportPtzPresets")),
-            Row("Vídeo e PTZ", "Ronda PTZ", Capability("SupportPtzTour")),
-            Row("Vídeo e PTZ", "Rastreamento de movimento", Capability("SupportMotionTracking")),
-            Row("Áudio", "Falar pela câmera", Capability("SupportTwoWayTalk")),
-            Row("Alarmes", "Detecção de movimento", Capability("SupportMotionDetection")),
-            Row("Alarmes", "Detecção de pessoa", person),
-            Row("Alarmes", "Aviso sonoro", sound),
-            Row("Alarmes", "Luz branca / luz dupla", doubleLight),
-            Row("Rede", "Wi-Fi", Capability("SupportWifi")),
-            Row("Rede", "RTSP", Capability("SupportRtsp")),
-            Row("Rede", "Sincronização NTP", Capability("SupportNtp")),
-            Row("Armazenamento", "Cartão e capacidade", "Leitura específica ainda não validada"),
-            Row("Gravação", "Plano e modo de gravação", "Leitura específica ainda não validada"),
-            Row("Sistema", "Atualização pela nuvem", Capability("SupportCloudUpgradeConfig"))
-        ];
+        PreviewBinding? online = previewBindings.Values.FirstOrDefault(candidate =>
+            string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&
+            confirmedPreviewWindows.ContainsKey(candidate.Window));
+
+        DeviceSettingRow[] BuildRows()
+        {
+            DeviceReadOnlyConfigStore.DeviceData local = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+            DeviceReadOnlyConfigStore.RecordingInfo? recording = online is not null &&
+                local.RecordingByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.RecordingInfo? channelRecording)
+                ? channelRecording
+                : local.RecordingByChannel.Values.OrderBy(item => item.Channel).FirstOrDefault();
+            DeviceReadOnlyConfigStore.LightInfo? light = online is not null &&
+                local.LightByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.LightInfo? channelLight)
+                ? channelLight
+                : local.LightByChannel.Values.OrderBy(item => item.Channel).FirstOrDefault();
+            string storageSummary = local.Storage is null
+                ? "Ainda não lido; disponível sob demanda"
+                : local.Storage.Partitions.Count == 0
+                    ? $"{local.Storage.DiskCount} disco(s); sem partição utilizável informada"
+                    : $"{local.Storage.DiskCount} disco(s); " +
+                      $"{local.Storage.Partitions.Sum(item => item.TotalMegabytes) / 1024d:F1} GB; " +
+                      $"{local.Storage.Partitions.Sum(item => item.FreeMegabytes) / 1024d:F1} GB livres";
+            string recordingSummary;
+            if (recording is null)
+            {
+                recordingSummary = "Ainda não lido; disponível sob demanda";
+            }
+            else
+            {
+                string[] targets =
+                [
+                    recording.UsesSata ? "SATA" : string.Empty,
+                    recording.UsesUsb ? "USB" : string.Empty,
+                    recording.UsesSd ? "SD" : string.Empty,
+                    recording.UsesDvd ? "DVD" : string.Empty
+                ];
+                string targetText = string.Join(", ", targets.Where(value => value.Length > 0));
+                if (targetText.Length == 0)
+                    targetText = "não informado";
+                recordingSummary = $"Canal {recording.Channel + 1}; modo {recording.RecordModeCode}; " +
+                    $"pré-gravação {recording.PreRecordSeconds}s; arquivo {recording.PacketLengthMinutes}min; " +
+                    $"{recording.EnabledSchedulePeriods} período(s); destino {targetText}";
+            }
+            string lightSummary = light is null
+                ? DetailedState(doubleLight)
+                : $"Canal {light.Channel + 1}; modo {light.WorkMode}; nível {light.Level}; " +
+                  $"duração {light.DurationSeconds}s; agenda {(light.ScheduleEnabled ? "ativa" : "inativa")}";
+
+            return
+            [
+                Row("Básicas", "Canais", Channels(), detailed: false),
+                Row("Básicas", "Modelo e firmware", profile?.Firmware.Length > 0 || profile?.ReportedModel.Length > 0
+                    ? "Informado" : "Não informado pelo provedor", detailed: false),
+                Row("Vídeo e PTZ", "Movimento PTZ", ptz),
+                Row("Vídeo e PTZ", "Posições favoritas", Capability("SupportPtzPresets")),
+                Row("Vídeo e PTZ", "Ronda PTZ", Capability("SupportPtzTour")),
+                Row("Vídeo e PTZ", "Rastreamento de movimento", Capability("SupportMotionTracking")),
+                Row("Áudio", "Falar pela câmera", Capability("SupportTwoWayTalk")),
+                Row("Alarmes", "Detecção de movimento", Capability("SupportMotionDetection")),
+                Row("Alarmes", "Detecção de pessoa", person),
+                Row("Alarmes", "Aviso sonoro", sound),
+                new DeviceSettingRow
+                {
+                    Section = "Alarmes", Setting = "Luz branca / luz dupla",
+                    Support = light is null ? doubleLight : "Dados locais",
+                    DataState = lightSummary
+                },
+                Row("Rede", "Wi-Fi", Capability("SupportWifi")),
+                new DeviceSettingRow
+                {
+                    Section = "Rede", Setting = "Transporte da câmera",
+                    Support = "Cloud P2P",
+                    DataState = "Dado local; senhas e chaves de rede não são consultadas"
+                },
+                Row("Rede", "RTSP", Capability("SupportRtsp")),
+                Row("Rede", "Sincronização NTP", Capability("SupportNtp")),
+                new DeviceSettingRow
+                {
+                    Section = "Armazenamento", Setting = "Cartão e capacidade",
+                    Support = local.Storage is null ? "Leitura disponível" : "Dados locais",
+                    DataState = storageSummary
+                },
+                new DeviceSettingRow
+                {
+                    Section = "Gravação", Setting = "Plano e modo de gravação",
+                    Support = recording is null ? "Leitura disponível" : "Dados locais",
+                    DataState = recordingSummary
+                },
+                Row("Sistema", "Atualização pela nuvem", Capability("SupportCloudUpgradeConfig"))
+            ];
+        }
 
         var table = new DataGrid
         {
-            ItemsSource = rows,
+            ItemsSource = BuildRows(),
             IsReadOnly = true,
             AutoGenerateColumns = false,
             CanUserAddRows = false,
@@ -4892,6 +5299,7 @@ public partial class MainWindow : Window
         var layout = new Grid { Margin = new Thickness(20) };
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var title = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
         title.Children.Add(new TextBlock
         {
@@ -4910,6 +5318,132 @@ public partial class MainWindow : Window
         layout.Children.Add(title);
         Grid.SetRow(table, 1);
         layout.Children.Add(table);
+
+        var footer = new DockPanel { Margin = new Thickness(0, 14, 0, 0) };
+        var status = new TextBlock
+        {
+            Text = "Nenhuma leitura é feita automaticamente nesta tela.",
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
+        };
+        DockPanel.SetDock(status, Dock.Left);
+        footer.Children.Add(status);
+        var actions = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+        };
+        var storageButton = new System.Windows.Controls.Button
+        {
+            Content = "Carregar armazenamento",
+            Padding = new Thickness(14, 8, 14, 8),
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        var recordingButton = new System.Windows.Controls.Button
+        {
+            Content = "Carregar gravação",
+            Padding = new Thickness(14, 8, 14, 8),
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        var lightButton = new System.Windows.Controls.Button
+        {
+            Content = "Carregar iluminação",
+            Padding = new Thickness(14, 8, 14, 8),
+            Margin = new Thickness(8, 0, 0, 0),
+            IsEnabled = doubleLight == "Disponível" ||
+                readOnlyDeviceConfigs.GetOrCreate(device.CloudId).LightByChannel.Count > 0
+        };
+        actions.Children.Add(storageButton);
+        actions.Children.Add(recordingButton);
+        actions.Children.Add(lightButton);
+        DockPanel.SetDock(actions, Dock.Right);
+        footer.Children.Add(actions);
+        Grid.SetRow(footer, 2);
+        layout.Children.Add(footer);
+
+        void RefreshRows()
+        {
+            table.ItemsSource = null;
+            table.ItemsSource = BuildRows();
+        }
+
+        bool PrepareRead()
+        {
+            online = previewBindings.Values.FirstOrDefault(candidate =>
+                string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&
+                confirmedPreviewWindows.ContainsKey(candidate.Window));
+            if (online is null)
+            {
+                status.Text = "A câmera precisa estar com imagem online para fazer esta leitura.";
+                return false;
+            }
+            if (!CanIssueDeviceRequest(online.DeviceId, out TimeSpan wait, out _, out _))
+            {
+                status.Text = $"Leitura protegida: aguarde {Math.Max(1, Math.Ceiling(wait.TotalMinutes))} minuto(s).";
+                return false;
+            }
+            storageButton.IsEnabled = false;
+            recordingButton.IsEnabled = false;
+            lightButton.IsEnabled = false;
+            return true;
+        }
+
+        void RestoreReadButtons()
+        {
+            DeviceReadOnlyConfigStore.DeviceData local = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+            int channel = online?.Channel ?? -1;
+            storageButton.Content = local.Storage is null ? "Carregar armazenamento" : "Armazenamento carregado";
+            storageButton.IsEnabled = local.Storage is null &&
+                !attemptedDetailedConfigReads.ContainsKey((device.CloudId, "Storage", -1));
+            bool recordingLoaded = channel >= 0 && local.RecordingByChannel.ContainsKey(channel);
+            recordingButton.Content = recordingLoaded ? "Gravação carregada" : "Carregar gravação";
+            recordingButton.IsEnabled = !recordingLoaded && (channel < 0 ||
+                !attemptedDetailedConfigReads.ContainsKey((device.CloudId, "Recording", channel)));
+            bool lightLoaded = channel >= 0 && local.LightByChannel.ContainsKey(channel);
+            lightButton.Content = lightLoaded ? "Iluminação carregada" : "Carregar iluminação";
+            lightButton.IsEnabled = !lightLoaded && doubleLight == "Disponível" && (channel < 0 ||
+                !attemptedDetailedConfigReads.ContainsKey((device.CloudId, "Light", channel)));
+        }
+
+        RestoreReadButtons();
+
+        storageButton.Click += async (_, _) =>
+        {
+            if (!PrepareRead() || online is null)
+                return;
+            status.Text = "Lendo armazenamento uma única vez...";
+            DeviceReadOnlyConfigStore.StorageInfo? result = await ReadStorageOnDemandAsync(device, online);
+            RefreshRows();
+            status.Text = result is null
+                ? "A câmera não retornou dados válidos. Nenhuma repetição automática será feita."
+                : "Armazenamento carregado e mantido no cache local.";
+            RestoreReadButtons();
+        };
+        recordingButton.Click += async (_, _) =>
+        {
+            if (!PrepareRead() || online is null)
+                return;
+            status.Text = $"Lendo gravação do canal {online.Channel + 1}, sem alterar a câmera...";
+            DeviceReadOnlyConfigStore.RecordingInfo? result = await ReadRecordingOnDemandAsync(device, online);
+            RefreshRows();
+            status.Text = result is null
+                ? "A câmera não retornou dados válidos. Nenhuma repetição automática será feita."
+                : "Configuração de gravação carregada e mantida no cache local.";
+            RestoreReadButtons();
+        };
+        lightButton.Click += async (_, _) =>
+        {
+            if (!PrepareRead() || online is null)
+                return;
+            status.Text = $"Lendo iluminação do canal {online.Channel + 1}, sem alterar a câmera...";
+            DeviceReadOnlyConfigStore.LightInfo? result = await ReadCameraLightOnDemandAsync(device, online);
+            RefreshRows();
+            status.Text = result is null
+                ? "A câmera não retornou dados válidos. Nenhuma repetição automática será feita."
+                : "Configuração de iluminação carregada e mantida no cache local.";
+            RestoreReadButtons();
+        };
 
         new Window
         {
@@ -6274,6 +6808,15 @@ public partial class MainWindow : Window
         if (isClosing)
             return;
         if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
+            pendingBinaryConfigReads.ContainsKey((p2, p4)))
+        {
+            // Nesta build do CMS: p1=resultado, p2=deviceId, p3=canal, p4=comando.
+            RecordDeviceRequestResult(p2, p1);
+            HandleBinaryDeviceConfigResponse(p1, p2, p4);
+            WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
+            return;
+        }
+        if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
             p4 is SystemFunctionCommand or PtzControlConfigCommand)
         {
             // Nesta build do CMS: p1=resultado, p2=deviceId, p3=canal, p4=comando.
@@ -6403,6 +6946,14 @@ public partial class MainWindow : Window
         foreach (var pending in pendingPtzConfigBuffers.ToArray())
             if (pendingPtzConfigBuffers.TryRemove(pending.Key, out IntPtr buffer) && buffer != IntPtr.Zero)
                 Marshal.FreeHGlobal(buffer);
+        foreach (var pending in pendingBinaryConfigReads.ToArray())
+        {
+            if (!pendingBinaryConfigReads.TryRemove(pending.Key, out PendingBinaryConfigRead? request))
+                continue;
+            if (request.Buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(request.Buffer);
+            request.Completion.TrySetResult(null);
+        }
         StopPtzCommand();
         StopActiveTalk();
         try
