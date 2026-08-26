@@ -223,6 +223,8 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> passiveRecoveryLocks = new();
+    private readonly ConcurrentDictionary<int, DeviceStabilityState> deviceStabilityStates = new();
     private readonly SemaphoreSlim manualReconnectCycleGate = new(1, 1);
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
     private readonly ConcurrentDictionary<int, DeviceRequestProtection> deviceRequestProtections = new();
@@ -231,8 +233,6 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<string, byte> queuedCapabilityDiscovery = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> attemptedCapabilityDiscovery = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim capabilityDiscoveryGate = new(1, 1);
-    private static readonly TimeSpan DeviceBlockCooldown = TimeSpan.FromHours(1);
-    private static readonly TimeSpan ManualReconnectSpacing = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan CapabilityDiscoveryInitialDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan CapabilityDiscoverySpacing = TimeSpan.FromSeconds(5);
     private const int SystemFunctionCommand = 1360;
@@ -352,6 +352,15 @@ public partial class MainWindow : Window
         internal int LastError;
         internal DateTime LastFailureUtc;
         internal DateTime NextAllowedUtc;
+    }
+
+    private sealed class DeviceStabilityState
+    {
+        internal readonly object Sync = new();
+        internal readonly Queue<DateTime> DisconnectsUtc = new();
+        internal DateTime LastDisconnectUtc;
+        internal DateTime UnstableUntilUtc;
+        internal DateTime LastPassiveCycleUtc;
     }
 
     private sealed class PtzCapabilityState
@@ -3828,9 +3837,8 @@ public partial class MainWindow : Window
                         continue;
                     }
                     TrackDeviceRequestProtection(device, info.ID);
-                    if (state == -27 || IsDeviceCooldownBlocked(info.ID))
+                    if (!CanIssueDeviceRequest(info.ID, out _, out _, out _))
                     {
-                        RecordDeviceRequestResult(info.ID, -27);
                         pending.Remove((device, channel));
                         rejected++;
                         progressed = true;
@@ -3959,11 +3967,12 @@ public partial class MainWindow : Window
                     device.CloudId,
                     Volatile.Read(ref previewGeneration));
                 previewBindings[destinationWindow] = binding;
-                bool cooldownBlocked = IsDeviceCooldownBlocked(pendingDeviceId);
-                bool automaticRecovery = preferences.AutoReconnect && !cooldownBlocked;
+                bool requestProtected = !CanIssueDeviceRequest(
+                    pendingDeviceId, out _, out _, out _);
+                bool automaticRecovery = preferences.AutoReconnect && !requestProtected;
                 SetPreviewStatus(
                     binding,
-                    cooldownBlocked ? DeviceBlockStatus(pendingDeviceId) :
+                    requestProtected ? DeviceBlockStatus(pendingDeviceId) :
                     automaticRecovery ? "Reconectando" : "Offline",
                     automaticRecovery ? System.Drawing.Color.Orange : System.Drawing.Color.IndianRed);
                 if (automaticRecovery)
@@ -4205,20 +4214,21 @@ public partial class MainWindow : Window
                 activeUntil = active.NextAllowedUtc;
                 activeError = active.LastError;
             }
-            if (activeError == -27 && activeUntil > DateTime.UtcNow)
+            if (activeError is -27 or -25 && activeUntil > DateTime.UtcNow)
             {
-                if (entry.LastRequestError != -27 ||
+                if (entry.LastRequestError != activeError ||
                     entry.RequestBlockedUntilUtc is not DateTime savedUntil ||
                     savedUntil.ToUniversalTime() < activeUntil)
                 {
-                    entry.LastRequestError = -27;
+                    entry.LastRequestError = activeError;
                     entry.RequestBlockedUntilUtc = activeUntil;
                     SaveCameraCatalog();
                 }
                 return;
             }
         }
-        if (entry.LastRequestError != -27 || entry.RequestBlockedUntilUtc is not DateTime blockedUntil)
+        if (entry.LastRequestError is not (-27 or -25) ||
+            entry.RequestBlockedUntilUtc is not DateTime blockedUntil)
             return;
 
         DateTime blockedUntilUtc = blockedUntil.ToUniversalTime();
@@ -4234,12 +4244,12 @@ public partial class MainWindow : Window
             cmsDeviceId, _ => new DeviceRequestProtection());
         lock (protection.Sync)
         {
-            protection.LastError = -27;
+            protection.LastError = entry.LastRequestError;
             protection.NextAllowedUtc = blockedUntilUtc;
         }
     }
 
-    private void PersistDeviceBlock(int device, DateTime blockedUntilUtc)
+    private void PersistDeviceProtection(int device, int error, DateTime blockedUntilUtc)
     {
         if (!deviceCloudIds.TryGetValue(device, out string? cloudId))
             return;
@@ -4250,12 +4260,31 @@ public partial class MainWindow : Window
             if (accountDevice is null)
                 return;
             CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(accountDevice, int.MaxValue);
-            if (entry.LastRequestError == -27 &&
+            if (entry.LastRequestError == error &&
                 entry.RequestBlockedUntilUtc is DateTime existing &&
                 existing.ToUniversalTime() >= blockedUntilUtc)
                 return;
-            entry.LastRequestError = -27;
+            entry.LastRequestError = error;
             entry.RequestBlockedUntilUtc = blockedUntilUtc;
+            SaveCameraCatalog();
+        }));
+    }
+
+    private void ClearPersistedDeviceProtection(int device)
+    {
+        if (!deviceCloudIds.TryGetValue(device, out string? cloudId))
+            return;
+        Dispatcher.BeginInvoke((Action)(() =>
+        {
+            CloudApi.AccountDevice? accountDevice = accountDevices.FirstOrDefault(item =>
+                string.Equals(item.CloudId, cloudId, StringComparison.Ordinal));
+            if (accountDevice is null)
+                return;
+            CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(accountDevice, int.MaxValue);
+            if (entry.LastRequestError == 0 && entry.RequestBlockedUntilUtc is null)
+                return;
+            entry.LastRequestError = 0;
+            entry.RequestBlockedUntilUtc = null;
             SaveCameraCatalog();
         }));
     }
@@ -4267,51 +4296,51 @@ public partial class MainWindow : Window
 
         DeviceRequestProtection protection = deviceRequestProtections.GetOrAdd(
             device, _ => new DeviceRequestProtection());
+        bool clearPersisted = false;
         lock (protection.Sync)
         {
             if (result > 0)
             {
                 // Um callback positivo passivo nao cancela a quarentena. O
-                // primeiro pedido do app so pode ocorrer apos a hora completa.
-                if (protection.LastError == -27 && protection.NextAllowedUtc > DateTime.UtcNow)
+                // primeiro pedido do app so pode ocorrer apos o prazo completo.
+                if (protection.LastError is -27 or -25 &&
+                    protection.NextAllowedUtc > DateTime.UtcNow)
                     return;
                 protection.ConsecutiveFailures = 0;
                 protection.LastError = 0;
                 protection.LastFailureUtc = default;
                 protection.NextAllowedUtc = default;
-                return;
+                clearPersisted = true;
             }
-
-            DateTime now = DateTime.UtcNow;
-            if (result == -27 && protection.LastError == -27 && protection.NextAllowedUtc > now)
+            else
             {
-                // O monitor CMS repete -27 passivamente. Nao prolongar a hora a
-                // cada callback, senao o dispositivo jamais sairia da quarentena.
-                return;
-            }
-            // The native monitor can repeat the same callback while processing
-            // one request. Count it once, otherwise a single request would look
-            // like a burst produced by the application.
-            if (protection.LastError == result &&
-                now - protection.LastFailureUtc < TimeSpan.FromSeconds(15))
-                return;
+                DateTime now = DateTime.UtcNow;
+                if (result is -27 or -25 &&
+                    protection.LastError == result && protection.NextAllowedUtc > now)
+                {
+                    // O monitor CMS pode repetir o mesmo erro passivamente. Não
+                    // prolongar a quarentena, senão ela nunca terminaria.
+                    return;
+                }
+                // The native monitor can repeat the same callback while processing
+                // one request. Count it once, otherwise a single request would look
+                // like a burst produced by the application.
+                if (protection.LastError == result &&
+                    now - protection.LastFailureUtc < TimeSpan.FromSeconds(15))
+                    return;
 
-            protection.LastError = result;
-            protection.LastFailureUtc = now;
-            protection.ConsecutiveFailures++;
-            if (result == -27)
-            {
-                protection.NextAllowedUtc = now + DeviceBlockCooldown;
-                PersistDeviceBlock(device, protection.NextAllowedUtc);
-                return;
+                protection.LastError = result;
+                protection.LastFailureUtc = now;
+                protection.ConsecutiveFailures++;
+                TimeSpan cooldown = ConnectionRecoveryPolicy.ErrorCooldown(
+                    result, protection.ConsecutiveFailures);
+                protection.NextAllowedUtc = now + cooldown;
+                if (result is -27 or -25)
+                    PersistDeviceProtection(device, result, protection.NextAllowedUtc);
             }
-
-            int exponent = Math.Min(4, Math.Max(0, protection.ConsecutiveFailures - 1));
-            int minutes = Math.Min(15, 1 << exponent);
-            if (result == -8)
-                minutes = Math.Max(minutes, 10);
-            protection.NextAllowedUtc = now + TimeSpan.FromMinutes(minutes);
         }
+        if (clearPersisted)
+            ClearPersistedDeviceProtection(device);
     }
 
     private bool CanIssueDeviceRequest(
@@ -4339,9 +4368,15 @@ public partial class MainWindow : Window
 
     private string DeviceBlockStatus(int device)
     {
-        if (!CanIssueDeviceRequest(device, out TimeSpan wait, out bool blockedByDevice, out _) &&
-            blockedByDevice)
-            return $"Bloqueada - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
+        if (!CanIssueDeviceRequest(
+                device, out TimeSpan wait, out bool blockedByDevice, out int lastError))
+        {
+            if (blockedByDevice)
+                return $"Bloqueada - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
+            if (lastError == -25)
+                return $"Limite de conexoes - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
+            return $"Em espera protegida ate {DateTime.Now.Add(wait):HH:mm}";
+        }
         return "Offline";
     }
 
@@ -4352,6 +4387,174 @@ public partial class MainWindow : Window
         if (CanIssueDeviceRequest(device, out TimeSpan wait, out _, out _))
             return configuredMinimum;
         return wait < configuredMinimum ? configuredMinimum : wait;
+    }
+
+    private bool RecordDeviceDisconnect(int device)
+    {
+        DeviceStabilityState state = deviceStabilityStates.GetOrAdd(
+            device, _ => new DeviceStabilityState());
+        DateTime now = DateTime.UtcNow;
+        lock (state.Sync)
+        {
+            if (state.LastDisconnectUtc != default &&
+                now - state.LastDisconnectUtc < TimeSpan.FromSeconds(15))
+                return state.UnstableUntilUtc > now;
+            state.LastDisconnectUtc = now;
+            while (state.DisconnectsUtc.Count > 0 &&
+                   now - state.DisconnectsUtc.Peek() >
+                   ConnectionRecoveryPolicy.UnstableObservationWindow)
+                state.DisconnectsUtc.Dequeue();
+            state.DisconnectsUtc.Enqueue(now);
+            if (state.DisconnectsUtc.Count >= 2)
+                state.UnstableUntilUtc = now + ConnectionRecoveryPolicy.UnstableModeDuration;
+            return state.UnstableUntilUtc > now;
+        }
+    }
+
+    private bool IsDeviceInUnstableMode(int device)
+    {
+        if (!deviceStabilityStates.TryGetValue(device, out DeviceStabilityState? state))
+            return false;
+        lock (state.Sync)
+            return state.UnstableUntilUtc > DateTime.UtcNow;
+    }
+
+    private bool TryReservePassiveRecoveryCycle(
+        int device, bool unstable, out TimeSpan remaining)
+    {
+        DeviceStabilityState state = deviceStabilityStates.GetOrAdd(
+            device, _ => new DeviceStabilityState());
+        DateTime now = DateTime.UtcNow;
+        TimeSpan minimum = ConnectionRecoveryPolicy.PassiveCycleMinimum(
+            unstable, preferences.ReconnectDelaySeconds);
+        lock (state.Sync)
+        {
+            TimeSpan elapsed = now - state.LastPassiveCycleUtc;
+            if (state.LastPassiveCycleUtc != DateTime.MinValue && elapsed < minimum)
+            {
+                remaining = minimum - elapsed;
+                return false;
+            }
+            state.LastPassiveCycleUtc = now;
+            remaining = TimeSpan.Zero;
+            return true;
+        }
+    }
+
+    private async Task RecoverReturnedDevicePreviewsAsync(int recoveredDeviceId)
+    {
+        SemaphoreSlim gate = passiveRecoveryLocks.GetOrAdd(
+            recoveredDeviceId, _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0))
+        {
+            Log($"Retomada passiva ja ativa: dispositivo {recoveredDeviceId}; callback duplicado ignorado.");
+            return;
+        }
+
+        try
+        {
+            bool unstable = IsDeviceInUnstableMode(recoveredDeviceId);
+            if (!TryReservePassiveRecoveryCycle(
+                    recoveredDeviceId, unstable, out TimeSpan cycleWait))
+            {
+                Log($"Retomada passiva aguardando o intervalo do dispositivo {recoveredDeviceId}; " +
+                    $"restante {Math.Ceiling(cycleWait.TotalSeconds)}s; nenhuma requisicao enviada agora.");
+                await Task.Delay(cycleWait);
+                if (isClosing || disconnectedPreviewDevices.ContainsKey(recoveredDeviceId) ||
+                    !automaticDeviceLoginResults.TryGetValue(
+                        recoveredDeviceId, out int delayedLoginState) || delayedLoginState <= 0)
+                    return;
+                unstable = IsDeviceInUnstableMode(recoveredDeviceId);
+                if (!TryReservePassiveRecoveryCycle(
+                        recoveredDeviceId, unstable, out TimeSpan secondWait))
+                {
+                    Log($"Retomada passiva ainda protegida: dispositivo {recoveredDeviceId}; " +
+                        $"restante {Math.Ceiling(secondWait.TotalSeconds)}s; ciclo encerrado sem pedidos.");
+                    return;
+                }
+            }
+
+            TimeSpan grace = ConnectionRecoveryPolicy.PassiveGrace(unstable);
+            Log($"Sessao P2P retornou passivamente: dispositivo {recoveredDeviceId}; " +
+                $"modo {(unstable ? "instavel" : "normal")}; aguardando {grace.TotalSeconds:0}s " +
+                "para os previews retomarem sozinhos.");
+            await Task.Delay(grace);
+            if (isClosing || disconnectedPreviewDevices.ContainsKey(recoveredDeviceId) ||
+                !automaticDeviceLoginResults.TryGetValue(recoveredDeviceId, out int loginState) ||
+                loginState <= 0)
+            {
+                Log($"Retomada passiva cancelada: dispositivo {recoveredDeviceId} perdeu a sessao durante a espera.");
+                return;
+            }
+
+            PreviewBinding[] missing = previewBindings.Values
+                .Where(binding =>
+                    binding.DeviceId == recoveredDeviceId &&
+                    binding.Generation == Volatile.Read(ref previewGeneration) &&
+                    !confirmedPreviewWindows.ContainsKey(binding.Window))
+                .OrderBy(binding => binding.Window)
+                .ToArray();
+            if (missing.Length == 0)
+            {
+                Log($"Retomada passiva concluida sem pedidos: dispositivo {recoveredDeviceId}; " +
+                    "todos os previews voltaram sozinhos.");
+                return;
+            }
+
+            if (!CanIssueDeviceRequest(
+                    recoveredDeviceId, out TimeSpan protectedWait,
+                    out _, out int protectedError))
+            {
+                foreach (PreviewBinding binding in missing)
+                    SetPreviewStatus(binding, DeviceBlockStatus(recoveredDeviceId), System.Drawing.Color.IndianRed);
+                Log($"Retomada passiva aguardara a protecao do dispositivo {recoveredDeviceId}; " +
+                    $"erro {protectedError}; restante {Math.Ceiling(protectedWait.TotalSeconds)}s; " +
+                    "nenhuma requisicao enviada agora.");
+                await Task.Delay(protectedWait);
+                if (isClosing || disconnectedPreviewDevices.ContainsKey(recoveredDeviceId) ||
+                    !CanIssueDeviceRequest(recoveredDeviceId, out _, out _, out _))
+                    return;
+                if (automaticDeviceLoginResults.TryGetValue(
+                        recoveredDeviceId, out int currentLoginState) && currentLoginState > 0)
+                    RecordDeviceRequestResult(recoveredDeviceId, currentLoginState);
+            }
+
+            int attempted = 0;
+            int recovered = 0;
+            foreach (PreviewBinding binding in missing)
+            {
+                if (isClosing || disconnectedPreviewDevices.ContainsKey(recoveredDeviceId))
+                    break;
+                if (!previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) ||
+                    current != binding || confirmedPreviewWindows.ContainsKey(binding.Window) ||
+                    recoveringPreviewWindows.ContainsKey(binding.Window))
+                    continue;
+                if (!CanIssueDeviceRequest(recoveredDeviceId, out _, out _, out _))
+                    break;
+
+                attempted++;
+                try { CmsSdk.CMS_Client_StopPreviewByWnd(binding.Window, 0); }
+                catch { }
+                activePreviewWindows.Remove(binding.Window);
+                confirmedPreviewWindows.TryRemove(binding.Window, out _);
+                failedPreviewWindows.TryRemove(binding.Window, out _);
+                SetPreviewStatus(binding, "Preparando retomada", System.Drawing.Color.Orange);
+                Log($"Retomada passiva: preview antigo encerrado localmente; dispositivo " +
+                    $"{recoveredDeviceId}; canal {binding.Channel}; janela {binding.Window}.");
+                await Task.Delay(500);
+                await RecoverPreviewAsync(binding, forceOneAttempt: true);
+                if (confirmedPreviewWindows.ContainsKey(binding.Window))
+                    recovered++;
+                if (!isClosing && attempted < missing.Length)
+                    await Task.Delay(ConnectionRecoveryPolicy.PreviewSpacing);
+            }
+            Log($"Retomada passiva concluida: dispositivo {recoveredDeviceId}; " +
+                $"ausentes {missing.Length}; tentados {attempted}; recuperados {recovered}.");
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     private async Task<bool> TryOpenConfirmedPreviewAsync(
@@ -4406,16 +4609,6 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private async Task RecoverDevicePreviewsAsync(int recoveredDeviceId, bool forceOneAttempt = false)
-    {
-        PreviewBinding[] bindings = previewBindings.Values
-            .Where(binding => binding.DeviceId == recoveredDeviceId)
-            .OrderBy(binding => binding.Window)
-            .ToArray();
-        foreach (PreviewBinding binding in bindings)
-            await RecoverPreviewAsync(binding, forceOneAttempt);
-    }
-
     private async Task RecoverPreviewAsync(PreviewBinding binding, bool forceOneAttempt = false)
     {
         const int maximumAutomaticAttempts = 3;
@@ -4431,6 +4624,13 @@ public partial class MainWindow : Window
                    attempt < maximumAutomaticAttempts &&
                    (preferences.AutoReconnect || forceOneAttempt && attempt == 0))
             {
+                if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                {
+                    SetPreviewStatus(binding, "Aguardando sinal", System.Drawing.Color.Orange);
+                    Log($"Recuperacao de preview suspensa: dispositivo {binding.DeviceId} sem sessao P2P; " +
+                        "nenhuma requisicao enviada.");
+                    return;
+                }
                 attempt++;
                 confirmedPreviewWindows.TryRemove(binding.Window, out _);
                 failedPreviewWindows.TryRemove(binding.Window, out _);
@@ -4442,10 +4642,10 @@ public partial class MainWindow : Window
                 if (!loginReady)
                 {
                     TimeSpan waitingDelay = GetProtectedRetryDelay(binding.DeviceId);
-                    if (IsDeviceCooldownBlocked(binding.DeviceId))
+                    if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
                     {
                         SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
-                        Log($"Reconexao suspensa por uma hora: dispositivo {binding.DeviceId}; nenhuma requisicao enviada.");
+                        Log($"Reconexao suspensa pela protecao ativa: dispositivo {binding.DeviceId}; nenhuma requisicao enviada.");
                         return;
                     }
                     if (forceOneAttempt)
@@ -4463,6 +4663,11 @@ public partial class MainWindow : Window
                 if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
                 {
                     SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    return;
+                }
+                if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                {
+                    SetPreviewStatus(binding, "Aguardando sinal", System.Drawing.Color.Orange);
                     return;
                 }
                 int result = CmsSdk.CMS_Client_StartPreview(
@@ -4497,7 +4702,7 @@ public partial class MainWindow : Window
                     }
                 }
                 TimeSpan retryDelay = GetProtectedRetryDelay(binding.DeviceId);
-                if (IsDeviceCooldownBlocked(binding.DeviceId))
+                if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
                 {
                     SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
                     return;
@@ -6112,6 +6317,14 @@ public partial class MainWindow : Window
                     !previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) ||
                     current != binding || confirmedPreviewWindows.ContainsKey(binding.Window))
                     continue;
+                if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                {
+                    protectedOrBusy++;
+                    SetPreviewStatus(binding, "Aguardando sinal", System.Drawing.Color.Orange);
+                    Log($"Ciclo manual: dispositivo {binding.DeviceId} ainda sem sessao P2P; " +
+                        $"canal {binding.Channel} ignorado; nenhuma requisicao enviada.");
+                    continue;
+                }
                 bool deviceAlreadyRecovering = previewBindings.Values.Any(candidate =>
                     candidate.DeviceId == binding.DeviceId &&
                     recoveringPreviewWindows.ContainsKey(candidate.Window));
@@ -6124,11 +6337,10 @@ public partial class MainWindow : Window
                 }
                 if (!CanIssueDeviceRequest(
                         binding.DeviceId, out TimeSpan wait,
-                        out bool blockedByDevice, out int lastError))
+                        out _, out int lastError))
                 {
                     protectedOrBusy++;
-                    if (blockedByDevice)
-                        SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
                     Log($"Ciclo manual: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
                         $"protegido apos erro {lastError}; restante {Math.Ceiling(wait.TotalSeconds)}s; " +
                         "nenhuma requisicao enviada.");
@@ -6147,7 +6359,7 @@ public partial class MainWindow : Window
                     recovered++;
 
                 if (!isClosing && processed < failed.Length)
-                    await Task.Delay(ManualReconnectSpacing);
+                    await Task.Delay(ConnectionRecoveryPolicy.PreviewSpacing);
             }
 
             SelectedCameraText.Text = processed == 0
@@ -6303,7 +6515,7 @@ public partial class MainWindow : Window
             ("Abrir", "Open"), ("Selecione uma gravação", "Select a recording"),
             ("Reproduzir", "Play"), ("Parar", "Stop"),
             ("Restaurar último layout", "Restore last layout"),
-            ("Reconexão automática", "Automatic reconnection"),
+            ("Reconexão ativa de canais isolados", "Active reconnection for isolated channels"),
             ("Iniciar junto com o Windows", "Start with Windows"),
             ("Qualidade padrão", "Default quality"),
             ("Tempo máximo para montar a grade", "Maximum grid connection time"),
@@ -7051,6 +7263,7 @@ public partial class MainWindow : Window
             return;
         }
         int lostPreviewWindow = -1;
+        bool deviceBecameUnstable = false;
         if (type == CmsSdk.MessageType.DeviceControl && p1 == 3)
         {
             automaticDeviceLoginResults[p2] = p4;
@@ -7082,15 +7295,13 @@ public partial class MainWindow : Window
         }
         if (type == CmsSdk.MessageType.DeviceControl && p1 == 4)
         {
+            automaticDeviceLoginResults[p2] = 0;
             disconnectedPreviewDevices[p2] = 0;
+            deviceBecameUnstable = RecordDeviceDisconnect(p2);
             foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
                 confirmedPreviewWindows.TryRemove(binding.Window, out _);
         }
-        bool deviceRequestAllowed = CanIssueDeviceRequest(p2, out _, out _, out _);
-        bool shouldRecoverDevice = preferences.AutoReconnect && deviceRequestAllowed &&
-            type == CmsSdk.MessageType.DeviceControl && p1 == 4 &&
-            previewBindings.Values.Any(binding => binding.DeviceId == p2);
-        bool shouldRecoverReturnedDevice = preferences.AutoReconnect && deviceRequestAllowed &&
+        bool shouldRecoverReturnedDevice =
             type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 > 0 &&
             disconnectedPreviewDevices.TryRemove(p2, out _);
         bool shouldRecoverPreview = preferences.AutoReconnect && lostPreviewWindow >= 0;
@@ -7100,7 +7311,7 @@ public partial class MainWindow : Window
         bool needsUiUpdate =
             type == CmsSdk.MessageType.VideoWindowControl && p1 is 0 or 7 or 27 ||
             type == CmsSdk.MessageType.DeviceControl && p1 is 3 or 4 ||
-            shouldRecoverDevice || shouldRecoverReturnedDevice || shouldRecoverPreview;
+            shouldRecoverReturnedDevice || shouldRecoverPreview;
         if (!needsUiUpdate)
             return;
         Dispatcher.BeginInvoke((Action)(() =>
@@ -7115,12 +7326,16 @@ public partial class MainWindow : Window
                 foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
                     SetPreviewStatus(
                         binding,
-                        IsDeviceCooldownBlocked(p2) ? DeviceBlockStatus(p2) :
-                        preferences.AutoReconnect ? "Reconectando" : "Offline",
-                        IsDeviceCooldownBlocked(p2) ? System.Drawing.Color.IndianRed :
-                        preferences.AutoReconnect ? System.Drawing.Color.Orange : System.Drawing.Color.IndianRed);
+                        CanIssueDeviceRequest(p2, out _, out _, out _)
+                            ? "Aguardando sinal"
+                            : DeviceBlockStatus(p2),
+                        CanIssueDeviceRequest(p2, out _, out _, out _)
+                            ? System.Drawing.Color.Orange
+                            : System.Drawing.Color.IndianRed);
+                Log($"Sessao P2P perdida: dispositivo {p2}; nenhuma requisicao enviada; " +
+                    $"modo {(deviceBecameUnstable ? "instavel por 30 minutos" : "observacao passiva")}.");
             }
-            if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 == -27)
+            if (type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 is -27 or -25)
             {
                 foreach (PreviewBinding binding in previewBindings.Values.Where(binding => binding.DeviceId == p2))
                     SetPreviewStatus(
@@ -7136,19 +7351,22 @@ public partial class MainWindow : Window
                 if (changedDevice is not null)
                 {
                     TrackDeviceRequestProtection(changedDevice, p2);
-                    changedDevice.RuntimeStatus = IsDeviceCooldownBlocked(p2)
+                    changedDevice.RuntimeStatus = !CanIssueDeviceRequest(p2, out _, out _, out _)
                         ? DeviceBlockStatus(p2)
-                        : p1 == 4 || p4 <= 0
-                        ? (preferences.AutoReconnect ? "Reconectando" : "Offline")
+                        : p1 == 4
+                        ? "Aguardando sinal"
+                        : p4 <= 0
+                        ? "Offline"
                         : "Online";
                     DeviceBox.Items.Refresh();
                 }
                 UpdateCameraSummary();
             }
-            if (shouldRecoverDevice || shouldRecoverReturnedDevice)
+            if (shouldRecoverReturnedDevice)
             {
-                Log($"Dispositivo {p2} perdeu ou retomou a sessão; reabrindo os previews associados.");
-                _ = RecoverDevicePreviewsAsync(p2);
+                Log($"Dispositivo {p2} retomou a sessao pelo monitor interno; " +
+                    "iniciando observacao passiva dos previews.");
+                _ = RecoverReturnedDevicePreviewsAsync(p2);
             }
             else if (shouldRecoverPreview &&
                      previewBindings.TryGetValue(lostPreviewWindow, out PreviewBinding? lostBinding))

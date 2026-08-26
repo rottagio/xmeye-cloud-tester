@@ -30,6 +30,20 @@ Require(catalog.Cameras["confirmed-double"].DetectedChannelCount == 2 &&
 
 Console.WriteLine("CHANNEL_MIGRATION_REGRESSION_OK");
 
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-27, 1) == TimeSpan.FromHours(1),
+    "O bloqueio -27 não preservou a quarentena de uma hora.");
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-25, 1) == TimeSpan.FromMinutes(10),
+    "O limite -25 não recebeu a pausa de dez minutos.");
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-8, 1) == TimeSpan.FromMinutes(10),
+    "O erro -8 não preservou o mínimo de dez minutos.");
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-7, 3) == TimeSpan.FromMinutes(4),
+    "O recuo exponencial comum foi alterado.");
+Require(ConnectionRecoveryPolicy.PassiveGrace(unstable: true) == TimeSpan.FromSeconds(15),
+    "O modo instável não recebeu a janela passiva ampliada.");
+Require(ConnectionRecoveryPolicy.PassiveCycleMinimum(true, 60) == TimeSpan.FromMinutes(5),
+    "O modo instável não limitou os ciclos passivos.");
+Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)
