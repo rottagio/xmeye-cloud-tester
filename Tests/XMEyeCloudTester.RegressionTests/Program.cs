@@ -66,6 +66,43 @@ Require(DeviceCapabilityCatalog.Definitions.SelectMany(item => item.ProviderAlia
     "O catálogo perdeu a grafia legada usada por firmwares XMEye.");
 Console.WriteLine("DEVICE_CAPABILITY_PROFILE_OK");
 
+Require(DeviceConfigurationCatalog.Definitions.Select(item => item.Key)
+        .Distinct(StringComparer.Ordinal).Count() == DeviceConfigurationCatalog.Definitions.Length,
+    "O catálogo de configurações contém chaves duplicadas.");
+Require(DeviceConfigurationCatalog.Definitions
+        .Where(item => item.RequiredCapability.Length > 0)
+        .All(item => DeviceCapabilityCatalog.Find(item.RequiredCapability) is not null),
+    "Uma configuração depende de uma capacidade que não existe no catálogo.");
+Require(DeviceConfigurationCatalog.Definitions
+        .Where(item => item.Risk == DeviceConfigurationCatalog.RiskLevel.Destructive)
+        .All(item => item.Access == DeviceConfigurationCatalog.AccessMode.Operation),
+    "Uma ação destrutiva foi catalogada como configuração comum.");
+Require(DeviceConfigurationCatalog.Definitions
+        .Where(item => item.WriteCommand is not null)
+        .All(item => item.Risk != DeviceConfigurationCatalog.RiskLevel.SafeRead),
+    "Um comando de gravação foi classificado como leitura segura.");
+
+profiles.RebuildConfigurationBindings("camera-a");
+DeviceProfileStore.ConfigurationBinding human =
+    profiles.Devices["camera-a"].CompatibleCommands["Alarm.Human"];
+Require(human.Supported is null && human.JsonName == "Detect.HumanDetection" &&
+        human.ReadCommand == 1042 && human.WriteCommand == 1040,
+    "O perfil não preservou o comando de detecção humana ainda desconhecido.");
+profiles.RecordCapability("camera-a", "SupportHumanDetection", true,
+    "SystemFunction: HumanDection");
+human = profiles.Devices["camera-a"].CompatibleCommands["Alarm.Human"];
+Require(human.Supported == true && human.Evidence == "SystemFunction: HumanDection",
+    "A capacidade confirmada não habilitou o comando correspondente.");
+DeviceProfileStore.ConfigurationBinding wifi =
+    profiles.Devices["camera-a"].CompatibleCommands["Network.Wifi"];
+Require(wifi.Supported == false && wifi.Risk == "SensitiveWrite",
+    "O Wi-Fi incompatível ou seu risco não foi preservado no perfil.");
+profiles.RecordConfigurationEvidence("camera-a", "Storage.Info", true,
+    "StorageInfo: resposta válida");
+Require(profiles.Devices["camera-a"].CompatibleCommands["Storage.Info"].Supported == true,
+    "A evidência direta de um comando não foi registrada.");
+Console.WriteLine("DEVICE_CONFIGURATION_CATALOG_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)

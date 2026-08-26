@@ -31,6 +31,22 @@ internal sealed class DeviceProfileStore
         public string Firmware { get; set; } = string.Empty;
     }
 
+    internal sealed class ConfigurationBinding
+    {
+        public bool? Supported { get; set; }
+        public string Section { get; set; } = string.Empty;
+        public string JsonName { get; set; } = string.Empty;
+        public int? ReadCommand { get; set; }
+        public int? WriteCommand { get; set; }
+        public string Scope { get; set; } = string.Empty;
+        public string Access { get; set; } = string.Empty;
+        public string Risk { get; set; } = string.Empty;
+        public string RequiredCapability { get; set; } = string.Empty;
+        public string Evidence { get; set; } = string.Empty;
+        public DateTime? ObservedAtUtc { get; set; }
+        public string Firmware { get; set; } = string.Empty;
+    }
+
     internal sealed class Profile
     {
         public string ReportedModel { get; set; } = string.Empty;
@@ -45,6 +61,8 @@ internal sealed class DeviceProfileStore
         public int? ConfirmedChannelCount { get; set; }
         public string ChannelCountSource { get; set; } = string.Empty;
         public Dictionary<string, CapabilityEvidence> Capabilities { get; set; } =
+            new(StringComparer.Ordinal);
+        public Dictionary<string, ConfigurationBinding> CompatibleCommands { get; set; } =
             new(StringComparer.Ordinal);
         public DateTime UpdatedAtUtc { get; set; }
     }
@@ -147,8 +165,10 @@ internal sealed class DeviceProfileStore
             // Capabilities are firmware-specific. A firmware change invalidates
             // old evidence instead of silently applying it to a different build.
             profile.Capabilities.Clear();
+            profile.CompatibleCommands.Clear();
             changed = true;
         }
+        changed |= RebuildConfigurationBindings(profile);
         if (changed)
             profile.UpdatedAtUtc = DateTime.UtcNow;
         return changed;
@@ -171,9 +191,32 @@ internal sealed class DeviceProfileStore
             ObservedAtUtc = DateTime.UtcNow,
             Firmware = profile.Firmware
         };
+        RebuildConfigurationBindings(profile);
         profile.UpdatedAtUtc = DateTime.UtcNow;
         return true;
     }
+
+    internal bool RecordConfigurationEvidence(
+        string deviceKey, string configurationKey, bool supported, string source)
+    {
+        Profile profile = GetOrCreate(deviceKey);
+        RebuildConfigurationBindings(profile);
+        if (!profile.CompatibleCommands.TryGetValue(configurationKey, out ConfigurationBinding? binding))
+            return false;
+        if (binding.Supported == supported &&
+            string.Equals(binding.Evidence, source, StringComparison.Ordinal) &&
+            string.Equals(binding.Firmware, profile.Firmware, StringComparison.Ordinal))
+            return false;
+        binding.Supported = supported;
+        binding.Evidence = source;
+        binding.ObservedAtUtc = DateTime.UtcNow;
+        binding.Firmware = profile.Firmware;
+        profile.UpdatedAtUtc = DateTime.UtcNow;
+        return true;
+    }
+
+    internal bool RebuildConfigurationBindings(string deviceKey) =>
+        RebuildConfigurationBindings(GetOrCreate(deviceKey));
 
     internal bool TryGetCurrentCapability(
         string deviceKey, string capability, out bool supported)
@@ -235,6 +278,9 @@ internal sealed class DeviceProfileStore
         int confirmedCapabilities = profile.Capabilities.Count;
         if (confirmedCapabilities > 0)
             details.Add($"Capacidades registradas: {confirmedCapabilities}");
+        int compatibleCommands = profile.CompatibleCommands.Count(item => item.Value.Supported == true);
+        if (compatibleCommands > 0)
+            details.Add($"Configurações compatíveis: {compatibleCommands}");
         return string.Join("  •  ", details);
     }
 
@@ -272,6 +318,85 @@ internal sealed class DeviceProfileStore
         changed |= Set(profile.ChipFamily, family, out string chipFamily);
         profile.ChipFamily = chipFamily;
         return changed;
+    }
+
+    private static bool RebuildConfigurationBindings(Profile profile)
+    {
+        bool changed = false;
+        foreach (DeviceConfigurationCatalog.Definition definition in DeviceConfigurationCatalog.Definitions)
+        {
+            bool? supported = null;
+            string evidence = definition.Evidence;
+            DateTime? observedAtUtc = null;
+            if (definition.RequiredCapability.Length > 0 &&
+                profile.Capabilities.TryGetValue(definition.RequiredCapability, out CapabilityEvidence? capability) &&
+                string.Equals(capability.Firmware, profile.Firmware, StringComparison.Ordinal))
+            {
+                supported = capability.Supported;
+                evidence = capability.Source;
+                observedAtUtc = capability.ObservedAtUtc;
+            }
+
+            if (!profile.CompatibleCommands.TryGetValue(definition.Key, out ConfigurationBinding? binding))
+            {
+                binding = new ConfigurationBinding();
+                profile.CompatibleCommands[definition.Key] = binding;
+                changed = true;
+            }
+
+            // A resposta direta de um comando prevalece sobre a declaração
+            // genérica de capacidade enquanto o firmware não mudar.
+            bool retainDirectEvidence = binding.ObservedAtUtc is not null &&
+                string.Equals(binding.Firmware, profile.Firmware, StringComparison.Ordinal) &&
+                !binding.Evidence.StartsWith("SystemFunction", StringComparison.Ordinal);
+            changed |= SetBinding(
+                binding,
+                definition,
+                retainDirectEvidence ? binding.Supported : supported,
+                retainDirectEvidence ? binding.Evidence : evidence,
+                retainDirectEvidence ? binding.ObservedAtUtc : observedAtUtc,
+                (retainDirectEvidence ? binding.ObservedAtUtc : observedAtUtc) is null
+                    ? string.Empty
+                    : profile.Firmware);
+        }
+        return changed;
+    }
+
+    private static bool SetBinding(
+        ConfigurationBinding binding,
+        DeviceConfigurationCatalog.Definition definition,
+        bool? supported,
+        string evidence,
+        DateTime? observedAtUtc,
+        string firmware)
+    {
+        bool changed = binding.Supported != supported ||
+            binding.Section != definition.Section ||
+            binding.JsonName != definition.JsonName ||
+            binding.ReadCommand != definition.ReadCommand ||
+            binding.WriteCommand != definition.WriteCommand ||
+            binding.Scope != definition.Scope.ToString() ||
+            binding.Access != definition.Access.ToString() ||
+            binding.Risk != definition.Risk.ToString() ||
+            binding.RequiredCapability != definition.RequiredCapability ||
+            binding.Evidence != evidence ||
+            binding.ObservedAtUtc != observedAtUtc ||
+            binding.Firmware != firmware;
+        if (!changed)
+            return false;
+        binding.Supported = supported;
+        binding.Section = definition.Section;
+        binding.JsonName = definition.JsonName;
+        binding.ReadCommand = definition.ReadCommand;
+        binding.WriteCommand = definition.WriteCommand;
+        binding.Scope = definition.Scope.ToString();
+        binding.Access = definition.Access.ToString();
+        binding.Risk = definition.Risk.ToString();
+        binding.RequiredCapability = definition.RequiredCapability;
+        binding.Evidence = evidence;
+        binding.ObservedAtUtc = observedAtUtc;
+        binding.Firmware = firmware;
+        return true;
     }
 
     private static bool SetIfPresent(string target, string candidate, out string value)
