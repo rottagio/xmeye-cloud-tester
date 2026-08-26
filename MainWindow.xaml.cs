@@ -1936,6 +1936,26 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private static bool TryFindAnyBoolean(
+        JsonElement element, IReadOnlyList<string> propertyNames,
+        out bool value, out string matchedProperties)
+    {
+        bool found = false;
+        bool anySupported = false;
+        var matches = new List<string>();
+        foreach (string propertyName in propertyNames)
+        {
+            if (!TryFindBoolean(element, propertyName, out bool supported))
+                continue;
+            found = true;
+            anySupported |= supported;
+            matches.Add(propertyName);
+        }
+        value = anySupported;
+        matchedProperties = string.Join(", ", matches);
+        return found;
+    }
+
     private void HandlePtzConfigResponse(
         int targetDeviceId, int command, IntPtr text1, IntPtr text2, uint size)
     {
@@ -3645,23 +3665,34 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(cloudId))
             return;
 
-        // Persist only a small allow-list of boolean evidence. The native JSON
-        // itself is never stored because it can contain device metadata.
-        string[] capabilityKeys =
+        // Different firmware generations report the same feature under different
+        // official keys (including legacy misspellings such as HumanDection).
+        // Normalize only this response already received from SystemFunction; the
+        // native JSON is never persisted because it can contain device metadata.
+        (string Canonical, string[] Aliases)[] capabilities =
         [
-            "SupportPTZDirectionControl",
-            "SupportHumanDetection",
-            "SupportDoubleLightCamera",
-            "SupportAlarmVoiceTipInterval",
-            "SupportDVRAlarmSound",
-            "SupportIPCAlarmSound",
-            "SupportCloudUpgradeConfig"
+            ("SupportPTZDirectionControl",
+                ["SupportPTZDirectionControl"]),
+            ("SupportHumanDetection",
+                ["SupportHumanDetection", "SupportSmartAppHumanDetect",
+                 "HumanDection", "MotionHumanDection"]),
+            ("SupportDoubleLightCamera",
+                ["SupportDoubleLightCamera", "SupportDoubleLightBoxCamera",
+                 "SupportPCSetDoubleLight"]),
+            ("SupportAlarmSound",
+                ["SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound",
+                 "SupportAlarmVoiceTips", "SupportAlarmVoiceTipsType"]),
+            ("SupportCloudUpgradeConfig",
+                ["SupportCloudUpgradeConfig", "SupportCfgCloudupgrade",
+                 "SupportCloudUpgrade"])
         ];
         bool changed = false;
-        foreach (string capability in capabilityKeys)
-            if (TryFindBoolean(root, capability, out bool supported))
+        foreach ((string canonical, string[] aliases) in capabilities)
+            if (TryFindAnyBoolean(root, aliases, out bool supported, out string matched))
                 changed |= deviceProfiles.RecordCapability(
-                    cloudId, capability, supported, "SystemFunction");
+                    cloudId, canonical, supported, "SystemFunction: " + matched);
+        changed |= deviceProfiles.RecordCapability(
+            cloudId, "Identification.SystemFunctionSchema2", true, "SystemFunction");
         if (changed)
             SaveDeviceProfiles();
     }
@@ -4836,7 +4867,7 @@ public partial class MainWindow : Window
                 return;
             }
             if (deviceProfiles.TryGetCurrentCapability(
-                    selectedRow.DeviceKey, "SupportPTZDirectionControl", out _))
+                    selectedRow.DeviceKey, "Identification.SystemFunctionSchema2", out _))
             {
                 identifyStatus.Text = "Identificação atual já disponível no cache; nenhuma consulta foi enviada.";
                 return;
@@ -4866,7 +4897,8 @@ public partial class MainWindow : Window
                 string.Equals(row.DeviceKey, selectedKey, StringComparison.Ordinal));
             int evidenceCount = deviceProfiles.Devices.TryGetValue(
                 selectedKey, out DeviceProfileStore.Profile? refreshedProfile)
-                ? refreshedProfile.Capabilities.Count
+                ? refreshedProfile.Capabilities.Keys.Count(key =>
+                    !key.StartsWith("Identification.", StringComparison.Ordinal))
                 : 0;
             identifyStatus.Text = evidenceCount > 0
                 ? $"Identificação concluída e salva no cache: {evidenceCount} evidência(s)."
@@ -4928,7 +4960,7 @@ public partial class MainWindow : Window
             Ptz = AnyCapability("SupportPTZDirectionControl", "PTZ.Direction"),
             HumanDetection = Capability("SupportHumanDetection"),
             DoubleLight = Capability("SupportDoubleLightCamera"),
-            AlarmSound = AnyCapability("SupportDVRAlarmSound", "SupportIPCAlarmSound"),
+            AlarmSound = AnyCapability("SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound"),
             CloudUpgrade = Capability("SupportCloudUpgradeConfig"),
             Updated = profile is not null && profile.UpdatedAtUtc != default
                 ? profile.UpdatedAtUtc.ToLocalTime().ToString("dd/MM HH:mm")
