@@ -103,6 +103,26 @@ Require(profiles.Devices["camera-a"].CompatibleCommands["Storage.Info"].Supporte
     "A evidência direta de um comando não foi registrada.");
 Console.WriteLine("DEVICE_CONFIGURATION_CATALOG_OK");
 
+DeviceConfigurationCatalog.Definition systemFunction =
+    DeviceConfigurationCatalog.Find("Capability.SystemFunction")!;
+DeviceConfigurationCatalog.Definition storageManage =
+    DeviceConfigurationCatalog.Find("Storage.Manage")!;
+DeviceConfigurationCatalog.Definition wifiConfig =
+    DeviceConfigurationCatalog.Find("Network.Wifi")!;
+DeviceConfigurationCatalog.Definition whiteLight =
+    DeviceConfigurationCatalog.Find("Light.White")!;
+Require(DeviceConfigurationReadPolicy.CanDiscoverAutomatically(systemFunction),
+    "SystemFunction deixou de ser a única descoberta automática permitida.");
+Require(!DeviceConfigurationReadPolicy.CanDiscoverAutomatically(wifiConfig),
+    "Uma leitura de rede sensível foi liberada automaticamente.");
+Require(!DeviceConfigurationReadPolicy.CanReadOnDemand(storageManage, null, out _),
+    "Uma operação destrutiva entrou no fluxo de leitura.");
+Require(!DeviceConfigurationReadPolicy.CanReadOnDemand(whiteLight, false, out _),
+    "A camada tentou ler um recurso negado pela própria câmera.");
+Require(DeviceConfigurationReadPolicy.CanReadOnDemand(whiteLight, true, out _),
+    "Uma leitura explicitamente suportada foi recusada.");
+Console.WriteLine("DEVICE_CONFIGURATION_READ_POLICY_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)

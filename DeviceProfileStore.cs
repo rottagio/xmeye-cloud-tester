@@ -197,7 +197,8 @@ internal sealed class DeviceProfileStore
     }
 
     internal bool RecordConfigurationEvidence(
-        string deviceKey, string configurationKey, bool supported, string source)
+        string deviceKey, string configurationKey, bool supported, string source,
+        DateTime? observedAtUtc = null)
     {
         Profile profile = GetOrCreate(deviceKey);
         RebuildConfigurationBindings(profile);
@@ -209,7 +210,7 @@ internal sealed class DeviceProfileStore
             return false;
         binding.Supported = supported;
         binding.Evidence = source;
-        binding.ObservedAtUtc = DateTime.UtcNow;
+        binding.ObservedAtUtc = observedAtUtc ?? DateTime.UtcNow;
         binding.Firmware = profile.Firmware;
         profile.UpdatedAtUtc = DateTime.UtcNow;
         return true;

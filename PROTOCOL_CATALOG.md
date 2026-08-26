@@ -40,3 +40,14 @@ O nome JSON diferencia a operação dentro de `1042/1040`. Os nomes e metadados 
 - O catálogo informa que o protocolo existe; o perfil individual só marca suporte após `SystemFunction` ou resposta direta válida.
 - Evidências são vinculadas ao firmware e descartadas quando o firmware muda.
 - O fluxo de conexão e reconexão não faz parte deste catálogo e não foi alterado.
+
+## Camada de leitura segura
+
+`DeviceConfigurationReadPolicy` é a porta única das leituras remotas:
+
+- `SystemFunction` é a única descoberta automática permitida; ocorre uma vez por dispositivo/firmware, depois da primeira imagem confirmada e sem repetição automática.
+- Armazenamento, gravação e iluminação continuam sob demanda e passam pela mesma fila serial já existente.
+- Uma definição sem comando de leitura, uma operação ou uma ação destrutiva é recusada antes de chegar ao SDK.
+- Se `SystemFunction` negar explicitamente uma capacidade, sua leitura detalhada também é recusada.
+- Respostas válidas são gravadas como evidência no perfil individual; timeouts e respostas inválidas não viram “incompatível”.
+- O cache local existente é reaproveitado no início, sem consultar novamente a câmera.

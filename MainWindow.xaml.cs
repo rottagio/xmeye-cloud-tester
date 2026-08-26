@@ -1886,6 +1886,14 @@ public partial class MainWindow : Window
 
                 // One inventory read per device/firmware, only after video is
                 // confirmed. There is no automatic retry in the same session.
+                DeviceConfigurationCatalog.Definition? inventoryDefinition =
+                    DeviceConfigurationCatalog.Find("Capability.SystemFunction");
+                if (inventoryDefinition is null ||
+                    !DeviceConfigurationReadPolicy.CanDiscoverAutomatically(inventoryDefinition))
+                {
+                    Log("Identificação automática bloqueada pela política de leitura.");
+                    continue;
+                }
                 attemptedCapabilityDiscovery[queued.CloudId] = 0;
                 await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
                 try
@@ -3574,9 +3582,46 @@ public partial class MainWindow : Window
         };
     }
 
+    private bool CanReadMappedConfiguration(
+        CloudApi.AccountDevice device,
+        string configurationKey,
+        out DeviceConfigurationCatalog.Definition? definition,
+        out string reason)
+    {
+        definition = DeviceConfigurationCatalog.Find(configurationKey);
+        if (definition is null)
+        {
+            reason = "Configuração ausente do catálogo técnico.";
+            return false;
+        }
+        bool? capabilitySupported = null;
+        if (definition.RequiredCapability.Length > 0 &&
+            deviceProfiles.TryGetCurrentCapability(
+                device.CloudId, definition.RequiredCapability, out bool supported))
+            capabilitySupported = supported;
+        return DeviceConfigurationReadPolicy.CanReadOnDemand(
+            definition, capabilitySupported, out reason);
+    }
+
+    private void RecordMappedConfiguration(
+        CloudApi.AccountDevice device,
+        string configurationKey,
+        string source,
+        DateTime observedAtUtc)
+    {
+        if (deviceProfiles.RecordConfigurationEvidence(
+                device.CloudId, configurationKey, true, source, observedAtUtc))
+            SaveDeviceProfiles();
+    }
+
     private async Task<DeviceReadOnlyConfigStore.StorageInfo?> ReadStorageOnDemandAsync(
         CloudApi.AccountDevice device, PreviewBinding online)
     {
+        if (!CanReadMappedConfiguration(device, "Storage.Info", out _, out string denied))
+        {
+            Log("Leitura de armazenamento recusada pela política: " + denied);
+            return null;
+        }
         DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
         if (cached.Storage is not null)
             return cached.Storage;
@@ -3595,6 +3640,8 @@ public partial class MainWindow : Window
                 return null;
             cached.Storage = parsed;
             readOnlyDeviceConfigs.Save();
+            RecordMappedConfiguration(device, "Storage.Info",
+                $"CMS binário 0x{StorageInfoCommand:X}", parsed.ObservedAtUtc);
             return parsed;
         }
         finally
@@ -3606,6 +3653,11 @@ public partial class MainWindow : Window
     private async Task<DeviceReadOnlyConfigStore.RecordingInfo?> ReadRecordingOnDemandAsync(
         CloudApi.AccountDevice device, PreviewBinding online)
     {
+        if (!CanReadMappedConfiguration(device, "Recording.Main", out _, out string denied))
+        {
+            Log("Leitura de gravação recusada pela política: " + denied);
+            return null;
+        }
         DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
         if (cached.RecordingByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.RecordingInfo? saved))
             return saved;
@@ -3633,6 +3685,8 @@ public partial class MainWindow : Window
                 return null;
             cached.RecordingByChannel[online.Channel] = parsed;
             readOnlyDeviceConfigs.Save();
+            RecordMappedConfiguration(device, "Recording.Main",
+                $"CMS binário 0x{RecordConfigCommand:X}", parsed.ObservedAtUtc);
             return parsed;
         }
         finally
@@ -3644,6 +3698,11 @@ public partial class MainWindow : Window
     private async Task<DeviceReadOnlyConfigStore.LightInfo?> ReadCameraLightOnDemandAsync(
         CloudApi.AccountDevice device, PreviewBinding online)
     {
+        if (!CanReadMappedConfiguration(device, "Light.White", out _, out string denied))
+        {
+            Log("Leitura de iluminação recusada pela política: " + denied);
+            return null;
+        }
         DeviceReadOnlyConfigStore.DeviceData cached = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
         if (cached.LightByChannel.TryGetValue(online.Channel, out DeviceReadOnlyConfigStore.LightInfo? saved))
             return saved;
@@ -3665,6 +3724,8 @@ public partial class MainWindow : Window
                 return null;
             cached.LightByChannel[online.Channel] = parsed;
             readOnlyDeviceConfigs.Save();
+            RecordMappedConfiguration(device, "Light.White",
+                $"CMS binário 0x{CameraLightConfigCommand:X}", parsed.ObservedAtUtc);
             return parsed;
         }
         finally
@@ -4146,9 +4207,33 @@ public partial class MainWindow : Window
         {
             CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
             changed |= deviceProfiles.UpdateIdentity(device, entry, GetLocalOemId(device));
+            changed |= ImportCachedConfigurationEvidence(device);
         }
         if (changed)
             SaveDeviceProfiles();
+    }
+
+    private bool ImportCachedConfigurationEvidence(CloudApi.AccountDevice device)
+    {
+        if (!readOnlyDeviceConfigs.Devices.TryGetValue(
+                device.CloudId, out DeviceReadOnlyConfigStore.DeviceData? cached))
+            return false;
+        bool changed = false;
+        if (cached.Storage is not null)
+            changed |= deviceProfiles.RecordConfigurationEvidence(
+                device.CloudId, "Storage.Info", true,
+                $"Cache CMS binário 0x{StorageInfoCommand:X}", cached.Storage.ObservedAtUtc);
+        if (cached.RecordingByChannel.Values.OrderBy(item => item.ObservedAtUtc).LastOrDefault()
+            is DeviceReadOnlyConfigStore.RecordingInfo recording)
+            changed |= deviceProfiles.RecordConfigurationEvidence(
+                device.CloudId, "Recording.Main", true,
+                $"Cache CMS binário 0x{RecordConfigCommand:X}", recording.ObservedAtUtc);
+        if (cached.LightByChannel.Values.OrderBy(item => item.ObservedAtUtc).LastOrDefault()
+            is DeviceReadOnlyConfigStore.LightInfo light)
+            changed |= deviceProfiles.RecordConfigurationEvidence(
+                device.CloudId, "Light.White", true,
+                $"Cache CMS binário 0x{CameraLightConfigCommand:X}", light.ObservedAtUtc);
+        return changed;
     }
 
     private void RecordSystemFunctionProfile(int targetDeviceId, JsonElement root)
