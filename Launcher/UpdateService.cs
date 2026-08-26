@@ -156,7 +156,9 @@ internal static class UpdateService
     {
         string[] requiredFiles =
         [
+            "XMEyeCloudTester.exe",
             "XMEyeCloudTester.dll",
+            "XMEyeCloudTester.App.exe",
             "XMEyeCloudTester.App.dll",
             "XMEyeCloudTester.App.deps.json",
             "QRCoder.dll",

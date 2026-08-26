@@ -3674,11 +3674,9 @@ public partial class MainWindow : Window
                     // O VMS Pro abre apenas canais conhecidos/selecionados; ele
                     // nao testa todos os canais novamente a cada troca de grade.
                     // Para um dispositivo novo, teste somente o canal principal.
-                    int configuredCount = catalogEntry.ChannelCountOverride is 1 or 2
-                        ? catalogEntry.ChannelCountOverride.Value
-                        : catalogEntry.DetectedChannelCount is 1 or 2
-                            ? catalogEntry.DetectedChannelCount.Value
-                            : 2;
+                    int configuredCount = cameraCatalog.ShouldProbeSecondaryChannel(accountDevices[index])
+                        ? 2
+                        : 1;
                     // Sem capacidade detectada, valida o principal e sonda o
                     // secundario uma unica vez. O loop impede que o secundario
                     // seja testado antes de o principal confirmar imagem.
@@ -3805,9 +3803,21 @@ public partial class MainWindow : Window
                             openedKeys.Contains(PreviewOrderKey(device.CloudId, 0));
                         if (rejectedSecondary && candidateCatalog.ChannelCountOverride is not (1 or 2))
                         {
-                            channelKnowledgeChanged |= cameraCatalog.SetDetectedChannelCount(device, 1);
-                            Log($"Grade: {device.Alias}; capacidade detectada automaticamente: 1 canal; " +
-                                "o secundario nao ocupara quadro offline.");
+                            if (candidateCatalog.SecondaryChannelConfirmedEver ||
+                                candidateCatalog.DetectedChannelCount == 2 ||
+                                candidateCatalog.KnownChannels.Contains(1))
+                            {
+                                Log($"Grade: {device.Alias}; canal 2 já confirmado anteriormente; " +
+                                    "falha atual tratada como transitória e histórico preservado.");
+                            }
+                            else
+                            {
+                                channelKnowledgeChanged |= cameraCatalog.RecordSecondaryChannelProbeFailure(device);
+                                string channelClassification = candidateCatalog.SecondaryChannelProbeFailures >= 2
+                                    ? "1 canal confirmado após duas verificações espaçadas"
+                                    : "canal 2 inconclusivo; nova verificação somente após 24h";
+                                Log($"Grade: {device.Alias}; {channelClassification}; o secundario nao ocupara quadro offline.");
+                            }
                         }
                         else
                         {
@@ -5128,6 +5138,33 @@ public partial class MainWindow : Window
         CameraSaveStatusText.Text = previewBindings.Count > 0
             ? "Teste iniciado. Consulte o estado no monitor Ao vivo."
             : "A câmera não iniciou o teste de vídeo.";
+    }
+
+    private void RedetectSelectedCameraChannels_Click(object sender, RoutedEventArgs e)
+    {
+        if (DeviceBox.SelectedItem is not CloudApi.AccountDevice device)
+        {
+            CameraSaveStatusText.Text = "Selecione uma câmera para revalidar os canais.";
+            return;
+        }
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        if (entry.ChannelCountOverride is 1 or 2)
+        {
+            CameraSaveStatusText.Text = "Selecione Detectar automaticamente e salve antes de revalidar.";
+            return;
+        }
+        if (!cameraCatalog.ResetInconclusiveChannelDetection(device))
+        {
+            CameraSaveStatusText.Text = entry.SecondaryChannelConfirmedEver || entry.KnownChannels.Contains(1)
+                ? "O canal 2 já possui confirmação histórica e não será removido."
+                : "A detecção já está pronta para o próximo teste.";
+            return;
+        }
+        SaveCameraCatalog();
+        RefreshDeviceProfilesFromKnownData();
+        DeviceBox_SelectionChanged(DeviceBox, null!);
+        CameraSaveStatusText.Text = "Detecção liberada. Abra novamente a grade para validar o canal 2 uma única vez.";
+        Log($"Redetecção explícita de canais liberada para o dispositivo selecionado; nenhuma chamada enviada agora.");
     }
 
     private void ShowSelectedDeviceSettings_Click(object sender, RoutedEventArgs e)

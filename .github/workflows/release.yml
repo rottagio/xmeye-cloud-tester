@@ -31,7 +31,9 @@ jobs:
           & cmd.exe /c "`"$vcvars`" >nul && cl /nologo /EHsc /LD /O2 .\NativeBridge\xmeye_bridge.cpp /link /OUT:.\XMEyeBridge.dll"
           if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar XMEyeBridge.dll' }
           New-Item -ItemType Directory -Path .\release-patch | Out-Null
+          Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.exe .\release-patch\
           Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.dll .\release-patch\
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.exe .\release-patch\
           Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.dll .\release-patch\
           Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.deps.json .\release-patch\
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll .\release-patch\
@@ -41,7 +43,9 @@ jobs:
           Copy-Item .\LEIA-ME.md .\release-patch\
           # Compatibilidade de uma unica versao com o instalador antigo, que
           # removia o primeiro caractere de cada caminho ao copiar os arquivos.
+          Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.exe '.\release-patch\!XMEyeCloudTester.exe'
           Copy-Item .\Launcher\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.dll '.\release-patch\!XMEyeCloudTester.dll'
+          Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.exe '.\release-patch\!XMEyeCloudTester.App.exe'
           Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.dll '.\release-patch\!XMEyeCloudTester.App.dll'
           Copy-Item .\bin\Release\net8.0-windows\win-x64\XMEyeCloudTester.App.deps.json '.\release-patch\!XMEyeCloudTester.App.deps.json'
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll '.\release-patch\!QRCoder.dll'

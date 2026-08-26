@@ -22,6 +22,12 @@ internal sealed class CameraCatalogStore
         // Preenchido somente depois de validar o canal principal e testar o
         // secundario no mesmo ciclo. Nao depende do nome ou modelo da camera.
         public int? DetectedChannelCount { get; set; }
+        // Um canal secundario que já exibiu imagem nunca pode ser removido por
+        // uma falha transitória posterior. Para dispositivos novos, duas
+        // falhas separadas por pelo menos 24 horas confirmam câmera de 1 canal.
+        public bool SecondaryChannelConfirmedEver { get; set; }
+        public int SecondaryChannelProbeFailures { get; set; }
+        public DateTime? LastSecondaryChannelProbeFailureUtc { get; set; }
         // null acompanha a qualidade global; true = SD; false = HD.
         public bool? PreferredSd { get; set; }
         // Espelha somente a exibição no computador; não altera a câmera.
@@ -68,7 +74,12 @@ internal sealed class CameraCatalogStore
                 return new CameraCatalogStore();
             CameraCatalogStore? loaded = JsonSerializer.Deserialize<CameraCatalogStore>(
                 File.ReadAllText(CatalogPath));
-            return loaded ?? new CameraCatalogStore();
+            if (loaded is null)
+                return new CameraCatalogStore();
+            foreach (Entry entry in loaded.Cameras.Values)
+                if (entry.DetectedChannelCount == 2 || entry.KnownChannels.Contains(1))
+                    entry.SecondaryChannelConfirmedEver = true;
+            return loaded;
         }
         catch
         {
@@ -132,21 +143,95 @@ internal sealed class CameraCatalogStore
     public bool MarkChannelAvailable(CloudApi.AccountDevice device, int channel)
     {
         Entry entry = GetOrCreate(device, int.MaxValue);
-        if (entry.KnownChannels.Contains(channel))
-            return false;
-        entry.KnownChannels.Add(channel);
-        entry.KnownChannels.Sort();
-        return true;
+        bool changed = false;
+        if (!entry.KnownChannels.Contains(channel))
+        {
+            entry.KnownChannels.Add(channel);
+            entry.KnownChannels.Sort();
+            changed = true;
+        }
+        if (channel > 0)
+        {
+            if (!entry.SecondaryChannelConfirmedEver)
+            {
+                entry.SecondaryChannelConfirmedEver = true;
+                changed = true;
+            }
+            if (entry.SecondaryChannelProbeFailures != 0 ||
+                entry.LastSecondaryChannelProbeFailureUtc is not null)
+            {
+                entry.SecondaryChannelProbeFailures = 0;
+                entry.LastSecondaryChannelProbeFailureUtc = null;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     public bool SetDetectedChannelCount(CloudApi.AccountDevice device, int count)
     {
         count = Math.Clamp(count, 1, 2);
         Entry entry = GetOrCreate(device, int.MaxValue);
+        if (count == 1 && (entry.SecondaryChannelConfirmedEver ||
+                          entry.DetectedChannelCount == 2 ||
+                          entry.KnownChannels.Contains(1)))
+            return false;
         bool changed = entry.DetectedChannelCount != count;
         entry.DetectedChannelCount = count;
-        if (count == 1)
-            changed |= entry.KnownChannels.RemoveAll(channel => channel > 0) > 0;
+        if (count == 2)
+        {
+            changed |= !entry.SecondaryChannelConfirmedEver;
+            entry.SecondaryChannelConfirmedEver = true;
+            entry.SecondaryChannelProbeFailures = 0;
+            entry.LastSecondaryChannelProbeFailureUtc = null;
+        }
+        return changed;
+    }
+
+    public bool ShouldProbeSecondaryChannel(CloudApi.AccountDevice device)
+    {
+        Entry entry = GetOrCreate(device, int.MaxValue);
+        if (entry.ChannelCountOverride is 1 or 2)
+            return entry.ChannelCountOverride == 2;
+        if (entry.SecondaryChannelConfirmedEver || entry.DetectedChannelCount == 2 ||
+            entry.KnownChannels.Contains(1))
+            return true;
+        if (entry.DetectedChannelCount == 1 || entry.SecondaryChannelProbeFailures >= 2)
+            return false;
+        return entry.SecondaryChannelProbeFailures == 0 ||
+            entry.LastSecondaryChannelProbeFailureUtc is not DateTime lastFailure ||
+            DateTime.UtcNow - lastFailure.ToUniversalTime() >= TimeSpan.FromHours(24);
+    }
+
+    public bool RecordSecondaryChannelProbeFailure(CloudApi.AccountDevice device)
+    {
+        Entry entry = GetOrCreate(device, int.MaxValue);
+        if (entry.SecondaryChannelConfirmedEver || entry.DetectedChannelCount == 2 ||
+            entry.KnownChannels.Contains(1))
+            return false;
+        DateTime now = DateTime.UtcNow;
+        if (entry.LastSecondaryChannelProbeFailureUtc is DateTime previous &&
+            now - previous.ToUniversalTime() < TimeSpan.FromHours(24))
+            return false;
+        entry.SecondaryChannelProbeFailures = Math.Min(2, entry.SecondaryChannelProbeFailures + 1);
+        entry.LastSecondaryChannelProbeFailureUtc = now;
+        if (entry.SecondaryChannelProbeFailures >= 2)
+            entry.DetectedChannelCount = 1;
+        return true;
+    }
+
+    public bool ResetInconclusiveChannelDetection(CloudApi.AccountDevice device)
+    {
+        Entry entry = GetOrCreate(device, int.MaxValue);
+        if (entry.SecondaryChannelConfirmedEver || entry.DetectedChannelCount == 2 ||
+            entry.KnownChannels.Contains(1))
+            return false;
+        bool changed = entry.DetectedChannelCount is not null ||
+            entry.SecondaryChannelProbeFailures != 0 ||
+            entry.LastSecondaryChannelProbeFailureUtc is not null;
+        entry.DetectedChannelCount = null;
+        entry.SecondaryChannelProbeFailures = 0;
+        entry.LastSecondaryChannelProbeFailureUtc = null;
         return changed;
     }
 

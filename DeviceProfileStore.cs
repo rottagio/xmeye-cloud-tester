@@ -120,6 +120,13 @@ internal sealed class DeviceProfileStore
             profile.ChannelCountSource = channelSource;
             changed = true;
         }
+        else if (confirmedChannels is null &&
+                 string.Equals(profile.ChannelCountSource, "previews com imagem confirmada", StringComparison.Ordinal))
+        {
+            profile.ConfirmedChannelCount = null;
+            profile.ChannelCountSource = string.Empty;
+            changed = true;
+        }
 
         changed |= ApplyFirmwareParts(profile);
         if (!string.Equals(previousFirmware, profile.Firmware, StringComparison.Ordinal) &&

@@ -429,12 +429,17 @@
                      <ComboBoxItem Content="HD (fluxo principal)" Tag="HD"/>
                    </ComboBox>
                    <TextBlock Text="Quantidade de canais desta câmera" Foreground="#CAD6E8"/>
-                   <ComboBox x:Name="CameraChannelCountBox" SelectedIndex="0" Margin="0,6,0,14"
-                             ToolTip="Use a quantidade confirmada no aplicativo oficial para impedir canais inexistentes na grade">
-                     <ComboBoxItem Content="Detectar automaticamente" Tag="Auto"/>
-                     <ComboBoxItem Content="1 canal" Tag="1"/>
-                     <ComboBoxItem Content="2 canais" Tag="2"/>
-                   </ComboBox>
+                   <Grid Margin="0,6,0,14">
+                     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                     <ComboBox x:Name="CameraChannelCountBox" SelectedIndex="0" Margin="0,0,8,0"
+                               ToolTip="Use a quantidade confirmada no aplicativo oficial para impedir canais inexistentes na grade">
+                       <ComboBoxItem Content="Detectar automaticamente" Tag="Auto"/>
+                       <ComboBoxItem Content="1 canal" Tag="1"/>
+                       <ComboBoxItem Content="2 canais" Tag="2"/>
+                     </ComboBox>
+                     <Button Grid.Column="1" Content="Revalidar" Click="RedetectSelectedCameraChannels_Click"
+                             ToolTip="Descartar somente uma classificação inconclusiva e testar novamente na próxima abertura da grade"/>
+                   </Grid>
                   <Expander Header="Recursos inteligentes desta câmera" Foreground="#CAD6E8"
                             Background="#0D1A29" BorderBrush="#29415D" BorderThickness="1"
                             Padding="10" Margin="0,0,0,14">
