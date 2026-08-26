@@ -52,6 +52,7 @@ public partial class MainWindow : Window
 
     private System.Drawing.Icon? nativeLargeIcon;
     private System.Drawing.Icon? nativeSmallIcon;
+    private bool finalNativeIconPassScheduled;
 
     private sealed class CameraHeaderLabel : Forms.Label
     {
@@ -425,6 +426,7 @@ public partial class MainWindow : Window
         sdkCallback = OnSdkMessage;
         InitializeComponent();
         SourceInitialized += ApplyNativeWindowIcon;
+        ContentRendered += ScheduleFinalNativeWindowIconPass;
         Closed += (_, _) => ReleaseNativeWindowIcons();
         if (controlledRequestTest)
             preferences.AutoReconnect = false;
@@ -478,6 +480,8 @@ public partial class MainWindow : Window
         if (cameraCatalog.MigratedLegacyChannelDetections > 0)
             Log($"Migração automática: {cameraCatalog.MigratedLegacyChannelDetections} " +
                 "detecção(ões) antiga(s) de canal liberada(s) para uma única revalidação.");
+        if (!string.IsNullOrWhiteSpace(App.WindowsIdentityRegistrationMessage))
+            Log(App.WindowsIdentityRegistrationMessage);
         if (!string.IsNullOrWhiteSpace(App.AccountLogoutCleanupMessage))
             Log(App.AccountLogoutCleanupMessage);
     }
@@ -1702,33 +1706,60 @@ public partial class MainWindow : Window
             SendPtzOneShot(19, preset, "abrir posição favorita");
     }
 
-    private void ApplyNativeWindowIcon(object? sender, EventArgs e)
-    {
-        var helper = new WindowInteropHelper(this);
-        string? executable = Environment.ProcessPath;
-        if (helper.Handle == IntPtr.Zero || string.IsNullOrWhiteSpace(executable))
-            return;
+    private void ApplyNativeWindowIcon(object? sender, EventArgs e) =>
+        ApplyNativeWindowIcon("SourceInitialized");
 
-        ReleaseNativeWindowIcons();
-        using System.Drawing.Icon? embedded = System.Drawing.Icon.ExtractAssociatedIcon(executable);
-        if (embedded is null)
-        {
-            Log("Ícone nativo: o executável não forneceu um ícone associado.");
+    private void ScheduleFinalNativeWindowIconPass(object? sender, EventArgs e)
+    {
+        if (finalNativeIconPassScheduled)
             return;
+        finalNativeIconPassScheduled = true;
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.ApplicationIdle,
+            new Action(() => ApplyNativeWindowIcon("ContentRendered/ApplicationIdle")));
+    }
+
+    private void ApplyNativeWindowIcon(string stage)
+    {
+        try
+        {
+            var helper = new WindowInteropHelper(this);
+            string? executable = Environment.ProcessPath;
+            if (helper.Handle == IntPtr.Zero || string.IsNullOrWhiteSpace(executable))
+                return;
+
+            using System.Drawing.Icon? embedded = System.Drawing.Icon.ExtractAssociatedIcon(executable);
+            if (embedded is null)
+            {
+                Log($"Ícone nativo ({stage}): o executável não forneceu um ícone associado.");
+                return;
+            }
+
+            var newLargeIcon = new System.Drawing.Icon(embedded, new System.Drawing.Size(32, 32));
+            var newSmallIcon = new System.Drawing.Icon(embedded, new System.Drawing.Size(16, 16));
+            BitmapSource windowIcon = Imaging.CreateBitmapSourceFromHIcon(
+                newLargeIcon.Handle, Int32Rect.Empty,
+                BitmapSizeOptions.FromWidthAndHeight(32, 32));
+            windowIcon.Freeze();
+            Icon = windowIcon;
+            _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
+                (IntPtr)NativeMethods.IconBig, newLargeIcon.Handle);
+            _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
+                (IntPtr)NativeMethods.IconSmall, newSmallIcon.Handle);
+
+            System.Drawing.Icon? oldLargeIcon = nativeLargeIcon;
+            System.Drawing.Icon? oldSmallIcon = nativeSmallIcon;
+            nativeLargeIcon = newLargeIcon;
+            nativeSmallIcon = newSmallIcon;
+            oldLargeIcon?.Dispose();
+            oldSmallIcon?.Dispose();
+            Log($"Ícone nativo aplicado ({stage}): janela=0x{helper.Handle.ToInt64():X}; " +
+                $"grande=0x{nativeLargeIcon.Handle.ToInt64():X}; pequeno=0x{nativeSmallIcon.Handle.ToInt64():X}.");
         }
-        nativeLargeIcon = new System.Drawing.Icon(embedded, new System.Drawing.Size(32, 32));
-        nativeSmallIcon = new System.Drawing.Icon(embedded, new System.Drawing.Size(16, 16));
-        BitmapSource windowIcon = Imaging.CreateBitmapSourceFromHIcon(
-            nativeLargeIcon.Handle, Int32Rect.Empty,
-            BitmapSizeOptions.FromWidthAndHeight(32, 32));
-        windowIcon.Freeze();
-        Icon = windowIcon;
-        _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
-            (IntPtr)NativeMethods.IconBig, nativeLargeIcon.Handle);
-        _ = NativeMethods.SendMessage(helper.Handle, NativeMethods.WmSetIcon,
-            (IntPtr)NativeMethods.IconSmall, nativeSmallIcon.Handle);
-        Log($"Ícone nativo aplicado: janela=0x{helper.Handle.ToInt64():X}; " +
-            $"grande=0x{nativeLargeIcon.Handle.ToInt64():X}; pequeno=0x{nativeSmallIcon.Handle.ToInt64():X}.");
+        catch (Exception ex)
+        {
+            Log($"Ícone nativo falhou ({stage}): {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void ReleaseNativeWindowIcons()

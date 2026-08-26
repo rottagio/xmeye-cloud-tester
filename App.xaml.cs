@@ -13,6 +13,7 @@ public partial class App : System.Windows.Application
     private bool restartAfterLogout;
 
     internal static string? AccountLogoutCleanupMessage { get; private set; }
+    internal static string? WindowsIdentityRegistrationMessage { get; private set; }
 
     static App()
     {
@@ -71,10 +72,14 @@ public partial class App : System.Windows.Application
             // SHCNE_ASSOCCHANGED: pede ao Explorer para reler a identidade e o
             // ícone sem apagar todo o cache nem reiniciar a barra de tarefas.
             SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
+            WindowsIdentityRegistrationMessage =
+                $"Identidade do Windows registrada: {AppUserModelId}; ícone={executable},0.";
         }
-        catch
+        catch (Exception ex)
         {
             // A janela ainda aplicará diretamente o ícone embutido no executável.
+            WindowsIdentityRegistrationMessage =
+                $"Identidade do Windows não pôde ser registrada: {ex.GetType().Name}: {ex.Message}";
         }
     }
 
