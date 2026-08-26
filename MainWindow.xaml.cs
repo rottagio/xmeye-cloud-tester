@@ -199,6 +199,7 @@ public partial class MainWindow : Window
     private readonly List<Forms.Panel> videoPanels = [];
     private readonly List<Forms.Label> videoLabels = [];
     private readonly List<Forms.Label> videoBadges = [];
+    private readonly List<Forms.Label> videoLoadingLabels = [];
     private readonly List<Forms.Panel> videoContainers = [];
     private PtzChevronControl[] videoPtzEdgeButtons = [];
     private readonly HashSet<int> activePreviewWindows = [];
@@ -1097,6 +1098,7 @@ public partial class MainWindow : Window
         videoPanels.Clear();
         videoLabels.Clear();
         videoBadges.Clear();
+        videoLoadingLabels.Clear();
         videoContainers.Clear();
         mirroredPreviewWindows.Clear();
         for (int index = 0; index < side * side; index++)
@@ -1144,12 +1146,25 @@ public partial class MainWindow : Window
                 Visible = false,
                 Anchor = Forms.AnchorStyles.Top | Forms.AnchorStyles.Right
             };
+            var loading = new Forms.Label
+            {
+                AutoSize = false,
+                BackColor = System.Drawing.Color.Black,
+                Dock = Forms.DockStyle.Fill,
+                ForeColor = System.Drawing.Color.FromArgb(142, 162, 188),
+                Font = new System.Drawing.Font("Segoe UI", 12F, System.Drawing.FontStyle.Regular),
+                Text = "Carregando...",
+                TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
+                Visible = true
+            };
+            panel.Controls.Add(loading);
             container.Controls.Add(panel);
             container.Controls.Add(label);
             container.Controls.Add(badge);
             Forms.ContextMenuStrip cameraMenu = CreatePreviewContextMenu(window);
             container.ContextMenuStrip = cameraMenu;
             panel.ContextMenuStrip = cameraMenu;
+            loading.ContextMenuStrip = cameraMenu;
             label.ContextMenuStrip = cameraMenu;
             badge.ContextMenuStrip = cameraMenu;
             void PositionBadge()
@@ -1165,6 +1180,8 @@ public partial class MainWindow : Window
             PositionBadge();
             panel.Click += (_, _) => SelectPreviewWindow(window);
             panel.DoubleClick += (_, _) => TogglePreviewFocus(window);
+            loading.Click += (_, _) => SelectPreviewWindow(window);
+            loading.DoubleClick += (_, _) => TogglePreviewFocus(window);
             label.Click += (_, _) => SelectPreviewWindow(window);
             label.DoubleClick += (_, _) => TogglePreviewFocus(window);
             label.MouseDown += (_, args) => PreviewDragMouseDown(window, args);
@@ -1176,6 +1193,7 @@ public partial class MainWindow : Window
             videoPanels.Add(panel);
             videoLabels.Add(label);
             videoBadges.Add(badge);
+            videoLoadingLabels.Add(loading);
             videoContainers.Add(container);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
@@ -3077,6 +3095,18 @@ public partial class MainWindow : Window
         label.ForeColor = System.Drawing.Color.Gold;
         label.Visible = true;
         label.BringToFront();
+        SetVideoLoadingState(window, "Carregando...");
+    }
+
+    private void SetVideoLoadingState(int window, string? message)
+    {
+        if (window < 0 || window >= videoLoadingLabels.Count)
+            return;
+        Forms.Label loading = videoLoadingLabels[window];
+        loading.Text = message ?? string.Empty;
+        loading.Visible = !string.IsNullOrWhiteSpace(message);
+        if (loading.Visible)
+            loading.BringToFront();
     }
 
     private void SetPreviewStatus(PreviewBinding binding, string status, System.Drawing.Color color)
@@ -3095,6 +3125,15 @@ public partial class MainWindow : Window
         label.ForeColor = color;
         label.Visible = true;
         label.BringToFront();
+        SetVideoLoadingState(
+            binding.Window,
+            status.StartsWith("Online", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : status.StartsWith("Reconectando", StringComparison.OrdinalIgnoreCase)
+                    ? "Reconectando..."
+                    : status.StartsWith("Alterando", StringComparison.OrdinalIgnoreCase)
+                        ? status + "..."
+                        : status);
         RefreshPreviewBadge(binding.Window);
     }
 
@@ -3438,6 +3477,9 @@ public partial class MainWindow : Window
             }
 
             rejected = Math.Max(0, requests.Count - opened - reconnecting);
+            for (int window = 0; window < videoLoadingLabels.Count; window++)
+                if (!previewBindings.ContainsKey(window) && !activePreviewWindows.Contains(window))
+                    SetVideoLoadingState(window, null);
             Log($"Grade preenchida em sequencia: {opened} fluxos confirmados; " +
                 $"{reconnecting} reconectando; {rejected} candidatos vazios ou recusados.");
 
@@ -3807,6 +3849,7 @@ public partial class MainWindow : Window
         if (startResult == 0)
         {
             previewBindings.TryRemove(window, out _);
+            SetVideoLoadingState(window, null);
             return false;
         }
 
@@ -3830,6 +3873,7 @@ public partial class MainWindow : Window
         previewBindings.TryRemove(window, out _);
         confirmedPreviewWindows.TryRemove(window, out _);
         failedPreviewWindows.TryRemove(window, out _);
+        SetVideoLoadingState(window, null);
         await Task.Delay(250);
         return false;
     }
@@ -5754,6 +5798,8 @@ public partial class MainWindow : Window
         activePreviewWindows.Clear();
         floatingPreviewWindows.Clear();
         previewBindings.Clear();
+        for (int window = 0; window < videoLoadingLabels.Count; window++)
+            SetVideoLoadingState(window, null);
         confirmedPreviewWindows.Clear();
         failedPreviewWindows.Clear();
         disconnectedPreviewDevices.Clear();
