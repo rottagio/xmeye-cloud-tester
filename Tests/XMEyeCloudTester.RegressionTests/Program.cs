@@ -42,6 +42,10 @@ Require(ConnectionRecoveryPolicy.PassiveGrace(unstable: true) == TimeSpan.FromSe
     "O modo instável não recebeu a janela passiva ampliada.");
 Require(ConnectionRecoveryPolicy.PassiveCycleMinimum(true, 60) == TimeSpan.FromMinutes(5),
     "O modo instável não limitou os ciclos passivos.");
+Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(true, 60) == TimeSpan.FromMinutes(5),
+    "O modo instável não limitou o login único do dispositivo.");
+Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromMinutes(1),
+    "O login normal não preservou o intervalo mínimo de um minuto.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
 static void Require(bool condition, string message)

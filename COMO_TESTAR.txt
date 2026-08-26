@@ -22,6 +22,11 @@ PROTEÇÃO CONTRA BLOQUEIO
   monitor interno recuperar a sessão e observa se os vídeos voltam sozinhos.
 - Após duas quedas em cinco minutos, o dispositivo entra em modo instável por
   30 minutos. Previews ainda ausentes são reabertos um por vez, nunca em paralelo.
+- Se o monitor interno responder que o dispositivo ainda está offline, um vigia
+  faz somente um login por dispositivo: após 1 minuto no modo normal ou a cada
+  no mínimo 5 minutos no modo instável. Os canais nunca multiplicam esse pedido.
+- O botão Reconectar falhas pode antecipar essa verificação, mas respeita o
+  intervalo mínimo de um minuto e todas as proteções já ativas.
 - O erro -25 (limite de conexões) pausa novas iniciativas por 10 minutos. O
   bloqueio -27 continua impondo uma hora completa, inclusive após reiniciar.
 - Trocas rápidas entre 1/4/9/16 são enfileiradas; somente a última grade pedida

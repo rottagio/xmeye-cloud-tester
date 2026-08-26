@@ -9,6 +9,7 @@ internal static class ConnectionRecoveryPolicy
     internal static readonly TimeSpan NormalPassiveGrace = TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan UnstablePassiveGrace = TimeSpan.FromSeconds(15);
     internal static readonly TimeSpan PreviewSpacing = TimeSpan.FromSeconds(3);
+    internal static readonly TimeSpan UnstableDeviceLoginMinimum = TimeSpan.FromMinutes(5);
 
     internal static TimeSpan ErrorCooldown(int error, int consecutiveFailures)
     {
@@ -30,5 +31,10 @@ internal static class ConnectionRecoveryPolicy
     internal static TimeSpan PassiveCycleMinimum(bool unstable, int configuredSeconds) =>
         unstable
             ? TimeSpan.FromMinutes(5)
+            : TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
+
+    internal static TimeSpan DeviceLoginMinimum(bool unstable, int configuredSeconds) =>
+        unstable
+            ? UnstableDeviceLoginMinimum
             : TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
 }

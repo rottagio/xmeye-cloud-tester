@@ -224,6 +224,8 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> passiveRecoveryLocks = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> disconnectedRecoveryLocks = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceLoginAttemptLocks = new();
     private readonly ConcurrentDictionary<int, DeviceStabilityState> deviceStabilityStates = new();
     private readonly SemaphoreSlim manualReconnectCycleGate = new(1, 1);
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
@@ -361,6 +363,7 @@ public partial class MainWindow : Window
         internal DateTime LastDisconnectUtc;
         internal DateTime UnstableUntilUtc;
         internal DateTime LastPassiveCycleUtc;
+        internal DateTime LastDeviceLoginAttemptUtc;
     }
 
     private sealed class PtzCapabilityState
@@ -4419,6 +4422,120 @@ public partial class MainWindow : Window
             return state.UnstableUntilUtc > DateTime.UtcNow;
     }
 
+    private TimeSpan GetDisconnectedDeviceLoginWait(int device, bool manual)
+    {
+        bool unstable = !manual && IsDeviceInUnstableMode(device);
+        TimeSpan minimum = ConnectionRecoveryPolicy.DeviceLoginMinimum(
+            unstable, preferences.ReconnectDelaySeconds);
+        DeviceStabilityState state = deviceStabilityStates.GetOrAdd(
+            device, _ => new DeviceStabilityState());
+        DateTime now = DateTime.UtcNow;
+        TimeSpan intervalWait;
+        lock (state.Sync)
+        {
+            DateTime anchor = state.LastDeviceLoginAttemptUtc != default
+                ? state.LastDeviceLoginAttemptUtc
+                : state.LastDisconnectUtc;
+            TimeSpan elapsed = anchor == default ? TimeSpan.Zero : now - anchor;
+            intervalWait = elapsed >= minimum ? TimeSpan.Zero : minimum - elapsed;
+        }
+        if (!CanIssueDeviceRequest(device, out TimeSpan protectedWait, out _, out _))
+            return protectedWait > intervalWait ? protectedWait : intervalWait;
+        return intervalWait;
+    }
+
+    private async Task<bool> TryRequestDisconnectedDeviceLoginAsync(int device, bool manual)
+    {
+        if (isClosing || !disconnectedPreviewDevices.ContainsKey(device))
+            return false;
+
+        SemaphoreSlim gate = deviceLoginAttemptLocks.GetOrAdd(
+            device, _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0))
+        {
+            Log($"Retomada do dispositivo {device} ja possui uma solicitacao em andamento; " +
+                "nenhuma chamada duplicada foi enviada.");
+            return false;
+        }
+
+        try
+        {
+            if (isClosing || !disconnectedPreviewDevices.ContainsKey(device))
+                return false;
+            TimeSpan wait = GetDisconnectedDeviceLoginWait(device, manual);
+            if (wait > TimeSpan.Zero)
+            {
+                Log($"Retomada {(manual ? "manual" : "automatica")} do dispositivo {device} " +
+                    $"protegida por mais {Math.Ceiling(wait.TotalSeconds)}s; nenhuma requisicao enviada.");
+                return false;
+            }
+            if (!CanIssueDeviceRequest(device, out TimeSpan protectedWait, out _, out int protectedError))
+            {
+                Log($"Login do dispositivo {device} suprimido apos erro {protectedError}; " +
+                    $"restante {Math.Ceiling(protectedWait.TotalSeconds)}s.");
+                return false;
+            }
+
+            DeviceStabilityState state = deviceStabilityStates.GetOrAdd(
+                device, _ => new DeviceStabilityState());
+            lock (state.Sync)
+                state.LastDeviceLoginAttemptUtc = DateTime.UtcNow;
+
+            await p2pReloginGate.WaitAsync();
+            try
+            {
+                if (isClosing || !disconnectedPreviewDevices.ContainsKey(device))
+                    return false;
+                int result = await Task.Run(
+                    () => CmsSdk.CMS_Client_DeviceLoginOrLogout(device, true));
+                Log($"Login unico por dispositivo solicitado: dispositivo {device}; " +
+                    $"origem {(manual ? "botao" : "vigia protegido")}; retorno {result}; " +
+                    "nenhum canal foi aberto nesta etapa.");
+                if (result < 0)
+                    RecordDeviceRequestResult(device, result);
+                return result != 0;
+            }
+            finally
+            {
+                p2pReloginGate.Release();
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task MonitorDisconnectedDeviceAsync(int device)
+    {
+        SemaphoreSlim gate = disconnectedRecoveryLocks.GetOrAdd(
+            device, _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0))
+            return;
+
+        try
+        {
+            while (!isClosing && disconnectedPreviewDevices.ContainsKey(device))
+            {
+                TimeSpan wait = GetDisconnectedDeviceLoginWait(device, manual: false);
+                if (wait > TimeSpan.Zero)
+                {
+                    Log($"Vigia de sinal: dispositivo {device}; nova tentativa unica em " +
+                        $"{Math.Ceiling(wait.TotalSeconds)}s; nenhuma requisicao durante a espera.");
+                    await Task.Delay(wait);
+                }
+                if (isClosing || !disconnectedPreviewDevices.ContainsKey(device))
+                    break;
+                await TryRequestDisconnectedDeviceLoginAsync(device, manual: false);
+                await Task.Delay(TimeSpan.FromSeconds(1));
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     private bool TryReservePassiveRecoveryCycle(
         int device, bool unstable, out TimeSpan remaining)
     {
@@ -6299,6 +6416,9 @@ public partial class MainWindow : Window
                 Log("Ciclo manual global dispensado: nenhum fluxo offline; nenhuma requisicao enviada.");
                 return;
             }
+            // Uma avaliação manual de falhas também entra no intervalo global,
+            // mesmo quando todas as chamadas forem suprimidas por proteção.
+            cycleUsed = true;
 
             bool english = string.Equals(
                 preferences.Language, "en", StringComparison.OrdinalIgnoreCase);
@@ -6306,8 +6426,24 @@ public partial class MainWindow : Window
             int processed = 0;
             int recovered = 0;
             int protectedOrBusy = 0;
+            int deviceLoginRequests = 0;
             Log($"Ciclo manual global iniciado: {failed.Length} fluxo(s) sem imagem; " +
                 "somente falhas serao avaliadas em sequencia.");
+
+            int[] disconnectedDevices = failed
+                .Where(binding => disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                .Select(binding => binding.DeviceId)
+                .Distinct()
+                .ToArray();
+            foreach (int disconnectedDevice in disconnectedDevices)
+            {
+                ReconnectFailedButton.Content = english
+                    ? "↻  Checking P2P signal"
+                    : "↻  Verificando sinal P2P";
+                if (await TryRequestDisconnectedDeviceLoginAsync(
+                        disconnectedDevice, manual: true))
+                    deviceLoginRequests++;
+            }
 
             foreach (PreviewBinding binding in failed)
             {
@@ -6348,7 +6484,6 @@ public partial class MainWindow : Window
                 }
 
                 processed++;
-                cycleUsed = true;
                 ReconnectFailedButton.Content = english
                     ? $"↻  Reconnecting {processed}/{failed.Length}"
                     : $"↻  Reconectando {processed}/{failed.Length}";
@@ -6362,11 +6497,14 @@ public partial class MainWindow : Window
                     await Task.Delay(ConnectionRecoveryPolicy.PreviewSpacing);
             }
 
-            SelectedCameraText.Text = processed == 0
+            SelectedCameraText.Text = processed == 0 && deviceLoginRequests > 0
+                ? $"Sinal P2P solicitado para {deviceLoginRequests} dispositivo(s); aguardando confirmação"
+                : processed == 0
                 ? $"{protectedOrBusy} câmera(s) aguardando proteção ou já reconectando"
                 : $"Ciclo concluído: {recovered} recuperada(s) em {processed} tentativa(s)";
             Log($"Ciclo manual global concluido: candidatas {failed.Length}; tentadas {processed}; " +
-                $"recuperadas {recovered}; protegidas ou ocupadas {protectedOrBusy}.");
+                $"logins unicos de dispositivo {deviceLoginRequests}; recuperadas {recovered}; " +
+                $"protegidas ou ocupadas {protectedOrBusy}.");
         }
         catch (Exception ex)
         {
@@ -7304,6 +7442,9 @@ public partial class MainWindow : Window
         bool shouldRecoverReturnedDevice =
             type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 > 0 &&
             disconnectedPreviewDevices.TryRemove(p2, out _);
+        bool shouldMonitorDisconnectedDevice =
+            type == CmsSdk.MessageType.DeviceControl &&
+            (p1 == 4 || p1 == 3 && p4 <= 0 && disconnectedPreviewDevices.ContainsKey(p2));
         bool shouldRecoverPreview = preferences.AutoReconnect && lostPreviewWindow >= 0;
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
@@ -7362,6 +7503,8 @@ public partial class MainWindow : Window
                 }
                 UpdateCameraSummary();
             }
+            if (shouldMonitorDisconnectedDevice)
+                _ = MonitorDisconnectedDeviceAsync(p2);
             if (shouldRecoverReturnedDevice)
             {
                 Log($"Dispositivo {p2} retomou a sessao pelo monitor interno; " +
