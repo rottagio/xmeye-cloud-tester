@@ -212,7 +212,13 @@ public partial class MainWindow : Window
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
     private readonly ConcurrentDictionary<int, DeviceRequestProtection> deviceRequestProtections = new();
     private readonly ConcurrentDictionary<int, string> deviceCloudIds = new();
+    private readonly ConcurrentQueue<PreviewBinding> capabilityDiscoveryQueue = new();
+    private readonly ConcurrentDictionary<string, byte> queuedCapabilityDiscovery = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> attemptedCapabilityDiscovery = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim capabilityDiscoveryGate = new(1, 1);
     private static readonly TimeSpan DeviceBlockCooldown = TimeSpan.FromHours(1);
+    private static readonly TimeSpan CapabilityDiscoveryInitialDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan CapabilityDiscoverySpacing = TimeSpan.FromSeconds(5);
     private const int SystemFunctionCommand = 1360;
     private const int PtzControlConfigCommand = 0x175;
     private const int DeviceConfigBufferSize = 64 * 1024;
@@ -319,7 +325,6 @@ public partial class MainWindow : Window
 
     private sealed class PtzCapabilityState
     {
-        internal bool Requested;
         internal bool? DeviceSupportsPtz;
         internal readonly Dictionary<int, (bool Mirror, bool Flip)> Channels = [];
     }
@@ -358,8 +363,21 @@ public partial class MainWindow : Window
         public required string HumanDetection { get; init; }
         public required string DoubleLight { get; init; }
         public required string AlarmSound { get; init; }
+        public required string MotionDetection { get; init; }
+        public required string MotionTracking { get; init; }
+        public required string PtzPresets { get; init; }
+        public required string TwoWayTalk { get; init; }
+        public required string Wifi { get; init; }
         public required string CloudUpgrade { get; init; }
         public required string Updated { get; init; }
+    }
+
+    private sealed class DeviceSettingRow
+    {
+        public required string Section { get; init; }
+        public required string Setting { get; init; }
+        public required string Support { get; init; }
+        public required string DataState { get; init; }
     }
 
     public MainWindow()
@@ -1700,65 +1718,63 @@ public partial class MainWindow : Window
         return command;
     }
 
-    private void EnsurePtzCapabilityRequested(int targetDeviceId)
+    private void QueueAutomaticCapabilityDiscovery(PreviewBinding binding)
     {
-        if (targetDeviceId <= 0 || isClosing)
+        if (isClosing || string.IsNullOrWhiteSpace(binding.CloudId) ||
+            deviceProfiles.TryGetCurrentCapability(
+                binding.CloudId, "Identification.SystemFunctionSchema3", out _))
             return;
-        PtzCapabilityState state = ptzCapabilities.GetOrAdd(targetDeviceId, _ => new PtzCapabilityState());
-        lock (state)
-        {
-            if (state.Requested)
-                return;
-
-            CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
-                item.CmsDeviceId == targetDeviceId ||
-                deviceCloudIds.TryGetValue(targetDeviceId, out string? cloudId) &&
-                string.Equals(item.CloudId, cloudId, StringComparison.Ordinal));
-            if (device is not null)
-            {
-                CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
-                if (deviceProfiles.TryGetCurrentCapability(
-                        device.CloudId, "SupportPTZDirectionControl", out bool cachedSupport) &&
-                    entry.PtzSupportedChannels.Count > 0)
-                {
-                    state.DeviceSupportsPtz = cachedSupport;
-                    foreach (int channel in entry.PtzSupportedChannels.Keys)
-                    {
-                        entry.PtzMirrorChannels.TryGetValue(channel, out bool mirror);
-                        entry.PtzFlipChannels.TryGetValue(channel, out bool flip);
-                        state.Channels[channel] = (mirror, flip);
-                    }
-                    state.Requested = true;
-                    Log($"Capacidade PTZ reutilizada do perfil local: dispositivo {targetDeviceId}; nenhuma consulta enviada.");
-                    return;
-                }
-            }
-
-            if (!CanIssueDeviceRequest(targetDeviceId, out TimeSpan wait, out _, out int lastError))
-            {
-                Log($"Consulta de capacidade PTZ suprimida: dispositivo {targetDeviceId}; " +
-                    $"erro {lastError}; espera restante {Math.Ceiling(wait.TotalMinutes)} min.");
-                return;
-            }
-            state.Requested = true;
-        }
-
-        _ = RequestPtzCapabilitySequenceAsync(targetDeviceId);
+        if (!queuedCapabilityDiscovery.TryAdd(binding.CloudId, 0))
+            return;
+        capabilityDiscoveryQueue.Enqueue(binding);
+        _ = ProcessAutomaticCapabilityDiscoveryQueueAsync();
     }
 
-    private async Task RequestPtzCapabilitySequenceAsync(int targetDeviceId)
+    private async Task ProcessAutomaticCapabilityDiscoveryQueueAsync()
     {
-        InitializePtzLogCursor();
-        RequestPtzConfig(targetDeviceId, SystemFunctionCommand,
-            "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
-        // O VMS aceita ambas as leituras em sequência, mas não precisamos
-        // enviá-las na mesma rajada. A orientação só é solicitada depois da
-        // leitura principal e apenas se a proteção ainda permitir.
-        await Task.Delay(800);
-        if (isClosing || !CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+        if (!await capabilityDiscoveryGate.WaitAsync(0).ConfigureAwait(false))
             return;
-        RequestPtzConfig(targetDeviceId, PtzControlConfigCommand,
-            "{\"Name\":\"Uart.PTZControlCmd\",\"SessionID\":\"0x08\"}");
+        try
+        {
+            await Task.Delay(CapabilityDiscoveryInitialDelay).ConfigureAwait(false);
+            while (!isClosing && capabilityDiscoveryQueue.TryDequeue(out PreviewBinding? queued))
+            {
+                queuedCapabilityDiscovery.TryRemove(queued.CloudId, out _);
+                if (deviceProfiles.TryGetCurrentCapability(
+                        queued.CloudId, "Identification.SystemFunctionSchema3", out _) ||
+                    attemptedCapabilityDiscovery.ContainsKey(queued.CloudId))
+                    continue;
+
+                PreviewBinding? online = previewBindings.Values.FirstOrDefault(candidate =>
+                    string.Equals(candidate.CloudId, queued.CloudId, StringComparison.Ordinal) &&
+                    confirmedPreviewWindows.ContainsKey(candidate.Window));
+                TimeSpan wait = TimeSpan.Zero;
+                int lastError = 0;
+                if (online is null ||
+                    !CanIssueDeviceRequest(online.DeviceId, out wait, out _, out lastError))
+                {
+                    if (online is not null)
+                        Log($"Identificacao automatica adiada: dispositivo {online.DeviceId}; " +
+                            $"erro {lastError}; espera {Math.Ceiling(wait.TotalMinutes)} min.");
+                    continue;
+                }
+
+                // One inventory read per device/firmware, only after video is
+                // confirmed. There is no automatic retry in the same session.
+                attemptedCapabilityDiscovery[queued.CloudId] = 0;
+                InitializePtzLogCursor();
+                RequestPtzConfig(online.DeviceId, SystemFunctionCommand,
+                    "{\"Name\":\"SystemFunction\",\"SessionID\":\"0x08\"}");
+                Log($"Identificacao automatica enviada uma vez apos a primeira imagem: dispositivo {online.DeviceId}.");
+                await Task.Delay(CapabilityDiscoverySpacing).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            capabilityDiscoveryGate.Release();
+            if (!isClosing && !capabilityDiscoveryQueue.IsEmpty)
+                _ = ProcessAutomaticCapabilityDiscoveryQueueAsync();
+        }
     }
 
     private string NetSdkLogPath => Path.Combine(AppContext.BaseDirectory, "Log", "log", "netsdk.log");
@@ -2061,7 +2077,7 @@ public partial class MainWindow : Window
             supported = state.DeviceSupportsPtz;
             channels = new Dictionary<int, (bool Mirror, bool Flip)>(state.Channels);
         }
-        if (supported is null || channels.Count == 0)
+        if (supported is null)
             return;
 
         CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(item =>
@@ -2070,6 +2086,25 @@ public partial class MainWindow : Window
         if (device is null)
             return;
         CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        bool orientationReported = channels.Count > 0;
+        if (!orientationReported)
+        {
+            foreach (int channel in previewBindings.Values
+                         .Where(binding => binding.DeviceId == targetDeviceId &&
+                             confirmedPreviewWindows.ContainsKey(binding.Window))
+                         .Select(binding => binding.Channel)
+                         .Distinct())
+            {
+                entry.PtzMirrorChannels.TryGetValue(channel, out bool mirror);
+                entry.PtzFlipChannels.TryGetValue(channel, out bool flip);
+                channels[channel] = (mirror, flip);
+            }
+            lock (state)
+                foreach ((int channel, var orientation) in channels)
+                    state.Channels[channel] = orientation;
+        }
+        if (channels.Count == 0)
+            return;
         entry.PtzSupportedChannels.Clear();
         entry.PtzMirrorChannels.Clear();
         entry.PtzFlipChannels.Clear();
@@ -2087,11 +2122,12 @@ public partial class MainWindow : Window
         foreach (int channel in channels.Keys)
             profileChanged |= deviceProfiles.RecordCapability(
                 device.CloudId, $"PTZ.Channel.{channel + 1}", supported == true,
-                "Uart.PTZControlCmd");
+                orientationReported ? "Uart.PTZControlCmd" : "SystemFunction + preview confirmado");
         if (profileChanged)
             SaveDeviceProfiles();
         int supportedChannels = entry.PtzSupportedChannels.Count(item => item.Value);
-        Log($"Capacidade PTZ confirmada: dispositivo {targetDeviceId}; canais suportados {supportedChannels}; orientação aplicada.");
+        Log($"Capacidade PTZ confirmada: dispositivo {targetDeviceId}; canais suportados {supportedChannels}; " +
+            (orientationReported ? "orientacao informada pelo dispositivo." : "orientacao local padrao preservada."));
         if (selectedPreviewWindow >= 0 && previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
             SelectPreviewWindow(selected.Window);
     }
@@ -3682,6 +3718,22 @@ public partial class MainWindow : Window
             ("SupportAlarmSound",
                 ["SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound",
                  "SupportAlarmVoiceTips", "SupportAlarmVoiceTipsType"]),
+            ("SupportMotionDetection",
+                ["SupportMotionDetection", "MotionDetect"]),
+            ("SupportMotionTracking",
+                ["SupportMotionTracking", "SupportDetectTrack"]),
+            ("SupportPtzPresets",
+                ["SupportPtzPresets", "SupportSetPTZPresetAttribute"]),
+            ("SupportPtzTour",
+                ["SupportPtzTour", "SupportPTZTour"]),
+            ("SupportTwoWayTalk",
+                ["SupportTwoWayTalk", "SupportTwoWayVoiceTalk", "Talk"]),
+            ("SupportWifi",
+                ["SupportWifi", "NetWifi"]),
+            ("SupportRtsp",
+                ["SupportRtsp", "NetRTSP"]),
+            ("SupportNtp",
+                ["SupportNtp", "NetNTP"]),
             ("SupportCloudUpgradeConfig",
                 ["SupportCloudUpgradeConfig", "SupportCfgCloudupgrade",
                  "SupportCloudUpgrade"])
@@ -3692,7 +3744,7 @@ public partial class MainWindow : Window
                 changed |= deviceProfiles.RecordCapability(
                     cloudId, canonical, supported, "SystemFunction: " + matched);
         changed |= deviceProfiles.RecordCapability(
-            cloudId, "Identification.SystemFunctionSchema2", true, "SystemFunction");
+            cloudId, "Identification.SystemFunctionSchema3", true, "SystemFunction");
         if (changed)
             SaveDeviceProfiles();
     }
@@ -3902,6 +3954,7 @@ public partial class MainWindow : Window
             {
                 activePreviewWindows.Add(window);
                 SetPreviewStatus(previewBindings[window], "Online", System.Drawing.Color.LimeGreen);
+                QueueAutomaticCapabilityDiscovery(previewBindings[window]);
                 return true;
             }
             if (failedPreviewWindows.ContainsKey(window))
@@ -3989,6 +4042,7 @@ public partial class MainWindow : Window
                         if (confirmedPreviewWindows.ContainsKey(binding.Window))
                         {
                             SetPreviewStatus(binding, "Online", System.Drawing.Color.LimeGreen);
+                            QueueAutomaticCapabilityDiscovery(binding);
                             Log($"Preview recuperado com imagem: dispositivo {binding.DeviceId}; " +
                                 $"canal {binding.Channel}; janela {binding.Window}.");
                             return;
@@ -4740,6 +4794,137 @@ public partial class MainWindow : Window
             : "A câmera não iniciou o teste de vídeo.";
     }
 
+    private void ShowSelectedDeviceSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (DeviceBox.SelectedItem is not CloudApi.AccountDevice device)
+        {
+            System.Windows.MessageBox.Show(this, "Selecione uma câmera.",
+                "Configurações da câmera", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        RefreshDeviceProfilesFromKnownData();
+        deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
+        string Capability(params string[] keys)
+        {
+            if (profile is null)
+                return "A identificar";
+            DeviceProfileStore.CapabilityEvidence[] evidence = keys
+                .Where(profile.Capabilities.ContainsKey)
+                .Select(key => profile.Capabilities[key])
+                .ToArray();
+            return evidence.Length == 0
+                ? "A identificar"
+                : evidence.Any(item => item.Supported) ? "Disponível" : "Não disponível";
+        }
+        string DetailedState(string support) => support == "Disponível"
+            ? "Será lida somente ao abrir esta seção"
+            : support;
+        string Channels()
+        {
+            CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+            int? count = profile?.ConfirmedChannelCount ?? entry.DetectedChannelCount;
+            return count is int value ? $"{value} confirmado(s)" : "A identificar";
+        }
+        DeviceSettingRow Row(string section, string setting, string support, bool detailed = true) => new()
+        {
+            Section = section,
+            Setting = setting,
+            Support = support,
+            DataState = detailed ? DetailedState(support) : "Dado local já recebido"
+        };
+
+        string ptz = Capability("SupportPTZDirectionControl", "PTZ.Direction");
+        string person = Capability("SupportHumanDetection");
+        string doubleLight = Capability("SupportDoubleLightCamera");
+        string sound = Capability("SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound");
+        DeviceSettingRow[] rows =
+        [
+            Row("Básicas", "Canais", Channels(), detailed: false),
+            Row("Básicas", "Modelo e firmware", profile?.Firmware.Length > 0 || profile?.ReportedModel.Length > 0
+                ? "Informado" : "Não informado pelo provedor", detailed: false),
+            Row("Vídeo e PTZ", "Movimento PTZ", ptz),
+            Row("Vídeo e PTZ", "Posições favoritas", Capability("SupportPtzPresets")),
+            Row("Vídeo e PTZ", "Ronda PTZ", Capability("SupportPtzTour")),
+            Row("Vídeo e PTZ", "Rastreamento de movimento", Capability("SupportMotionTracking")),
+            Row("Áudio", "Falar pela câmera", Capability("SupportTwoWayTalk")),
+            Row("Alarmes", "Detecção de movimento", Capability("SupportMotionDetection")),
+            Row("Alarmes", "Detecção de pessoa", person),
+            Row("Alarmes", "Aviso sonoro", sound),
+            Row("Alarmes", "Luz branca / luz dupla", doubleLight),
+            Row("Rede", "Wi-Fi", Capability("SupportWifi")),
+            Row("Rede", "RTSP", Capability("SupportRtsp")),
+            Row("Rede", "Sincronização NTP", Capability("SupportNtp")),
+            Row("Armazenamento", "Cartão e capacidade", "Leitura específica ainda não validada"),
+            Row("Gravação", "Plano e modo de gravação", "Leitura específica ainda não validada"),
+            Row("Sistema", "Atualização pela nuvem", Capability("SupportCloudUpgradeConfig"))
+        ];
+
+        var table = new DataGrid
+        {
+            ItemsSource = rows,
+            IsReadOnly = true,
+            AutoGenerateColumns = false,
+            CanUserAddRows = false,
+            CanUserDeleteRows = false,
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+            GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
+            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(7, 17, 30)),
+            Foreground = System.Windows.Media.Brushes.White,
+            BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(38, 58, 80)),
+            RowBackground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(10, 21, 35)),
+            AlternatingRowBackground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(13, 28, 45)),
+            HorizontalGridLinesBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(38, 58, 80)),
+            VerticalGridLinesBrush = System.Windows.Media.Brushes.Transparent
+        };
+        static void AddSettingColumn(DataGrid grid, string header, string property, double width) =>
+            grid.Columns.Add(new DataGridTextColumn
+            {
+                Header = header,
+                Binding = new System.Windows.Data.Binding(property),
+                Width = new DataGridLength(width)
+            });
+        AddSettingColumn(table, "Seção", nameof(DeviceSettingRow.Section), 145);
+        AddSettingColumn(table, "Configuração", nameof(DeviceSettingRow.Setting), 235);
+        AddSettingColumn(table, "Compatibilidade", nameof(DeviceSettingRow.Support), 190);
+        AddSettingColumn(table, "Estado dos dados", nameof(DeviceSettingRow.DataState), 300);
+
+        var layout = new Grid { Margin = new Thickness(20) };
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var title = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
+        title.Children.Add(new TextBlock
+        {
+            Text = $"Configurações — {device.Alias}",
+            Foreground = System.Windows.Media.Brushes.White,
+            FontSize = 22,
+            FontWeight = FontWeights.SemiBold
+        });
+        title.Children.Add(new TextBlock
+        {
+            Text = "Esta tela usa o inventário local. As leituras detalhadas serão feitas sob demanda, uma seção por vez; abrir esta tela não consulta a câmera.",
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 5, 0, 0)
+        });
+        layout.Children.Add(title);
+        Grid.SetRow(table, 1);
+        layout.Children.Add(table);
+
+        new Window
+        {
+            Owner = this,
+            Title = "Configurações da câmera",
+            Width = 950,
+            Height = 650,
+            MinWidth = 760,
+            MinHeight = 460,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(8, 20, 33)),
+            Content = layout
+        }.ShowDialog();
+    }
+
     private void ShowCompatibilityTable_Click(object sender, RoutedEventArgs e)
     {
         RefreshDeviceProfilesFromKnownData();
@@ -4791,6 +4976,11 @@ public partial class MainWindow : Window
         AddColumn(table, "Pessoa", nameof(DeviceCompatibilityRow.HumanDetection), 95);
         AddColumn(table, "Luz dupla", nameof(DeviceCompatibilityRow.DoubleLight), 95);
         AddColumn(table, "Alarme sonoro", nameof(DeviceCompatibilityRow.AlarmSound), 115);
+        AddColumn(table, "Movimento", nameof(DeviceCompatibilityRow.MotionDetection), 95);
+        AddColumn(table, "Rastreamento", nameof(DeviceCompatibilityRow.MotionTracking), 105);
+        AddColumn(table, "Favoritos PTZ", nameof(DeviceCompatibilityRow.PtzPresets), 105);
+        AddColumn(table, "Falar", nameof(DeviceCompatibilityRow.TwoWayTalk), 85);
+        AddColumn(table, "Wi-Fi", nameof(DeviceCompatibilityRow.Wifi), 85);
         AddColumn(table, "Upgrade cloud", nameof(DeviceCompatibilityRow.CloudUpgrade), 110);
         AddColumn(table, "Atualizado", nameof(DeviceCompatibilityRow.Updated), 125);
 
@@ -4808,7 +4998,7 @@ public partial class MainWindow : Window
         });
         heading.Children.Add(new TextBlock
         {
-            Text = "Tabela local construída com dados já recebidos. '?' significa que o recurso ainda não foi identificado; nenhuma consulta é enviada ao abrir esta tela.",
+            Text = "A identificação ocorre automaticamente, uma vez, após a primeira imagem de cada câmera. '?' significa que a câmera ainda não conectou ou não informou o recurso. Abrir esta tela não envia consultas.",
             Foreground = new System.Windows.Media.SolidColorBrush(
                 System.Windows.Media.Color.FromRgb(142, 162, 188)),
             TextWrapping = TextWrapping.Wrap,
@@ -4820,14 +5010,14 @@ public partial class MainWindow : Window
 
         var identifyButton = new System.Windows.Controls.Button
         {
-            Content = "Identificar selecionada",
+            Content = "Atualizar tabela",
             Margin = new Thickness(0, 12, 12, 0),
             Padding = new Thickness(16, 8, 16, 8),
             HorizontalAlignment = System.Windows.HorizontalAlignment.Left
         };
         var identifyStatus = new TextBlock
         {
-            Text = "Selecione uma câmera online. A leitura será feita somente por clique e ficará em cache.",
+            Text = "Mostrando somente dados locais já recebidos das câmeras.",
             Foreground = new System.Windows.Media.SolidColorBrush(
                 System.Windows.Media.Color.FromRgb(142, 162, 188)),
             VerticalAlignment = VerticalAlignment.Center,
@@ -4841,69 +5031,16 @@ public partial class MainWindow : Window
         Grid.SetRow(footer, 2);
         content.Children.Add(footer);
 
-        identifyButton.Click += async (_, _) =>
+        identifyButton.Click += (_, _) =>
         {
-            if (table.SelectedItem is not DeviceCompatibilityRow selectedRow)
-            {
-                identifyStatus.Text = "Selecione uma câmera na tabela.";
-                return;
-            }
-            CloudApi.AccountDevice? selectedDevice = accountDevices.FirstOrDefault(device =>
-                string.Equals(device.CloudId, selectedRow.DeviceKey, StringComparison.Ordinal));
-            PreviewBinding? onlineBinding = previewBindings.Values.FirstOrDefault(binding =>
-                string.Equals(binding.CloudId, selectedRow.DeviceKey, StringComparison.Ordinal) &&
-                confirmedPreviewWindows.ContainsKey(binding.Window));
-            if (selectedDevice is null || onlineBinding is null)
-            {
-                identifyStatus.Text = "Essa câmera não possui imagem online confirmada agora. Nenhuma consulta foi enviada.";
-                return;
-            }
-            if (!CanIssueDeviceRequest(
-                    onlineBinding.DeviceId, out TimeSpan wait, out bool blocked, out int lastError))
-            {
-                identifyStatus.Text = blocked
-                    ? $"Câmera em quarentena; aguarde {Math.Ceiling(wait.TotalMinutes)} min."
-                    : $"Leitura protegida após erro {lastError}; aguarde {Math.Ceiling(wait.TotalMinutes)} min.";
-                return;
-            }
-            if (deviceProfiles.TryGetCurrentCapability(
-                    selectedRow.DeviceKey, "Identification.SystemFunctionSchema2", out _))
-            {
-                identifyStatus.Text = "Identificação atual já disponível no cache; nenhuma consulta foi enviada.";
-                return;
-            }
-            if (ptzCapabilities.TryGetValue(
-                    onlineBinding.DeviceId, out PtzCapabilityState? existingState))
-            {
-                lock (existingState)
-                {
-                    if (existingState.Requested)
-                    {
-                        identifyStatus.Text = "A identificação já foi solicitada nesta sessão. Aguarde a resposta do dispositivo.";
-                        return;
-                    }
-                }
-            }
-
-            identifyButton.IsEnabled = false;
-            identifyStatus.Text = "Identificando uma câmera: duas leituras protegidas e serializadas...";
-            EnsurePtzCapabilityRequested(onlineBinding.DeviceId);
-            await Task.Delay(3500);
             RefreshDeviceProfilesFromKnownData();
-            string selectedKey = selectedRow.DeviceKey;
+            string? selectedKey = (table.SelectedItem as DeviceCompatibilityRow)?.DeviceKey;
             DeviceCompatibilityRow[] refreshedRows = accountDevices.Select(BuildCompatibilityRow).ToArray();
             table.ItemsSource = refreshedRows;
-            table.SelectedItem = refreshedRows.FirstOrDefault(row =>
-                string.Equals(row.DeviceKey, selectedKey, StringComparison.Ordinal));
-            int evidenceCount = deviceProfiles.Devices.TryGetValue(
-                selectedKey, out DeviceProfileStore.Profile? refreshedProfile)
-                ? refreshedProfile.Capabilities.Keys.Count(key =>
-                    !key.StartsWith("Identification.", StringComparison.Ordinal))
-                : 0;
-            identifyStatus.Text = evidenceCount > 0
-                ? $"Identificação concluída e salva no cache: {evidenceCount} evidência(s)."
-                : "O dispositivo não devolveu capacidades identificáveis. Não haverá repetição automática.";
-            identifyButton.IsEnabled = true;
+            if (selectedKey is not null)
+                table.SelectedItem = refreshedRows.FirstOrDefault(row =>
+                    string.Equals(row.DeviceKey, selectedKey, StringComparison.Ordinal));
+            identifyStatus.Text = $"Tabela local atualizada às {DateTime.Now:HH:mm:ss}. Nenhuma consulta foi enviada.";
         };
 
         var dialog = new Window
@@ -4961,6 +5098,11 @@ public partial class MainWindow : Window
             HumanDetection = Capability("SupportHumanDetection"),
             DoubleLight = Capability("SupportDoubleLightCamera"),
             AlarmSound = AnyCapability("SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound"),
+            MotionDetection = Capability("SupportMotionDetection"),
+            MotionTracking = Capability("SupportMotionTracking"),
+            PtzPresets = Capability("SupportPtzPresets"),
+            TwoWayTalk = Capability("SupportTwoWayTalk"),
+            Wifi = Capability("SupportWifi"),
             CloudUpgrade = Capability("SupportCloudUpgradeConfig"),
             Updated = profile is not null && profile.UpdatedAtUtc != default
                 ? profile.UpdatedAtUtc.ToLocalTime().ToString("dd/MM HH:mm")
@@ -6135,6 +6277,7 @@ public partial class MainWindow : Window
             p4 is SystemFunctionCommand or PtzControlConfigCommand)
         {
             // Nesta build do CMS: p1=resultado, p2=deviceId, p3=canal, p4=comando.
+            RecordDeviceRequestResult(p2, p1);
             HandlePtzConfigResponse(p2, p4, text1, text2, size);
             WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
             return;

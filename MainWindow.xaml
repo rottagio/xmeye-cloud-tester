@@ -357,6 +357,8 @@
                           HorizontalAlignment="Left" Margin="0,0,10,0" Click="RefreshOnlineDevices_Click"/>
                   <Button Content="Compatibilidade" ToolTip="Ver identificação e recursos detectados"
                           HorizontalAlignment="Left" Margin="0,0,10,0" Click="ShowCompatibilityTable_Click"/>
+                  <Button Content="Configurações da câmera" ToolTip="Ver recursos e configurações da câmera selecionada"
+                          HorizontalAlignment="Left" Margin="0,0,10,0" Click="ShowSelectedDeviceSettings_Click"/>
                   <ComboBox x:Name="CameraGroupFilterBox" Width="190" SelectedIndex="0"
                             ToolTip="Filtrar por grupo ou ambiente" SelectionChanged="CameraGroupFilter_SelectionChanged">
                     <ComboBoxItem Content="Todos os grupos" Tag="*"/>
