@@ -262,10 +262,6 @@ public partial class MainWindow : Window
     private long previewGeneration;
     private int previewDragWindow = -1;
     private System.Drawing.Point previewDragStart;
-    private readonly DispatcherTimer onlineRefreshTimer = new()
-    {
-        Interval = TimeSpan.FromMinutes(1)
-    };
     private readonly DispatcherTimer layoutRestoreTimer = new()
     {
         Interval = TimeSpan.FromMilliseconds(900)
@@ -421,7 +417,6 @@ public partial class MainWindow : Window
         UpdateStreamQualityButtons();
         Loaded += OnLoaded;
         Closing += OnClosing;
-        onlineRefreshTimer.Tick += async (_, _) => await RefreshOnlineDevicesAsync(false);
         Log($"Diagnostico iniciado: sessao {diagnosticSession}; versao {version.Major}.{version.Minor}.{version.Build}; " +
             $"Windows {Environment.OSVersion.Version}; processo {RuntimeInformation.ProcessArchitecture}.");
         if (!string.IsNullOrWhiteSpace(App.AccountLogoutCleanupMessage))
@@ -4275,8 +4270,6 @@ public partial class MainWindow : Window
         try { cameraCatalog.Save(); }
         catch (Exception ex) { Log("Nao foi possivel salvar a organizacao das cameras: " + ex.Message); }
         RefreshDeviceProfilesFromKnownData();
-        if (accountDevices.Count > 0 && CloudSessionStore.Exists && !onlineRefreshTimer.IsEnabled)
-            onlineRefreshTimer.Start();
     }
 
     private void RestoreManualCatalogDevices()
@@ -5707,7 +5700,6 @@ public partial class MainWindow : Window
 
     private void ClearAccountDevices()
     {
-        onlineRefreshTimer.Stop();
         DeviceBox.ItemsSource = null;
         DeviceBox.IsEnabled = false;
         OpenCameraButton.IsEnabled = false;
@@ -6083,7 +6075,6 @@ public partial class MainWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         isClosing = true;
-        onlineRefreshTimer.Stop();
         layoutRestoreTimer.Stop();
         cameraHoverTimer.Stop();
         recordingPlaybackTimer.Stop();
