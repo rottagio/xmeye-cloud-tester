@@ -3846,7 +3846,7 @@ public partial class MainWindow : Window
                         rejected++;
                         progressed = true;
                         if (rejectionLogged.Add(device.CloudId))
-                            Log($"Grade: {device.Alias}; {DeviceBlockStatus(info.ID)}; nenhuma requisicao sera enviada durante a quarentena.");
+                            Log($"Grade: {device.Alias}; {DeviceBlockStatus(info.ID)}; nenhuma requisicao sera enviada durante o intervalo seguro.");
                         continue;
                     }
                     if (info.LoginHandle <= 0 && state <= 0)
@@ -3970,6 +3970,18 @@ public partial class MainWindow : Window
                     device.CloudId,
                     Volatile.Read(ref previewGeneration));
                 previewBindings[destinationWindow] = binding;
+                bool monitorReportedUnavailable =
+                    !automaticDeviceLoginResults.TryGetValue(
+                        pendingDeviceId, out int pendingLoginState) || pendingLoginState <= 0;
+                if (monitorReportedUnavailable &&
+                    disconnectedPreviewDevices.TryAdd(pendingDeviceId, 0))
+                {
+                    bool unstable = RecordInitialDeviceUnavailable(pendingDeviceId);
+                    Log($"Grade: dispositivo {pendingDeviceId} ganhou quadro sem sessao P2P; " +
+                        $"vigia unico iniciado em modo {(unstable ? "instavel" : "normal")}; " +
+                        "os canais nao geram pedidos separados.");
+                    _ = MonitorDisconnectedDeviceAsync(pendingDeviceId);
+                }
                 bool requestProtected = !CanIssueDeviceRequest(
                     pendingDeviceId, out _, out _, out _);
                 bool automaticRecovery = preferences.AutoReconnect && !requestProtected;
@@ -4378,7 +4390,7 @@ public partial class MainWindow : Window
                 return $"Bloqueada - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
             if (lastError == -25)
                 return $"Limite de conexoes - aguarde ate {DateTime.Now.Add(wait):HH:mm}";
-            return $"Em espera protegida ate {DateTime.Now.Add(wait):HH:mm}";
+            return $"Aguardando sinal - nova tentativa ate {DateTime.Now.Add(wait):HH:mm}";
         }
         return "Offline";
     }
@@ -4411,6 +4423,21 @@ public partial class MainWindow : Window
             if (state.DisconnectsUtc.Count >= 2)
                 state.UnstableUntilUtc = now + ConnectionRecoveryPolicy.UnstableModeDuration;
             return state.UnstableUntilUtc > now;
+        }
+    }
+
+    private bool RecordInitialDeviceUnavailable(int device)
+    {
+        DeviceStabilityState state = deviceStabilityStates.GetOrAdd(
+            device, _ => new DeviceStabilityState());
+        lock (state.Sync)
+        {
+            // Montar novamente a grade não representa outra queda física. A
+            // primeira indisponibilidade apenas ancora o intervalo seguro; só o
+            // callback DeviceControl=4 alimenta o histórico de instabilidade.
+            if (state.LastDisconnectUtc == default)
+                state.LastDisconnectUtc = DateTime.UtcNow;
+            return state.UnstableUntilUtc > DateTime.UtcNow;
         }
     }
 

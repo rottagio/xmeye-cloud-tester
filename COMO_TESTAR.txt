@@ -25,6 +25,8 @@ PROTEÇÃO CONTRA BLOQUEIO
 - Se o monitor interno responder que o dispositivo ainda está offline, um vigia
   faz somente um login por dispositivo: após 1 minuto no modo normal ou a cada
   no mínimo 5 minutos no modo instável. Os canais nunca multiplicam esse pedido.
+- O mesmo vigia é vinculado quando a câmera já chega offline antes da montagem
+  da grade, mas somente se um canal conhecido ocupar um quadro do monitor.
 - O botão Reconectar falhas pode antecipar essa verificação, mas respeita o
   intervalo mínimo de um minuto e todas as proteções já ativas.
 - O erro -25 (limite de conexões) pausa novas iniciativas por 10 minutos. O
