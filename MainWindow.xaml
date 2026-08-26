@@ -355,6 +355,8 @@
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
                   <Button x:Name="RefreshOnlineDevicesButton" Content="↻  Atualizar nomes e câmeras da nuvem"
                           HorizontalAlignment="Left" Margin="0,0,10,0" Click="RefreshOnlineDevices_Click"/>
+                  <Button Content="Compatibilidade" ToolTip="Ver identificação e recursos detectados"
+                          HorizontalAlignment="Left" Margin="0,0,10,0" Click="ShowCompatibilityTable_Click"/>
                   <ComboBox x:Name="CameraGroupFilterBox" Width="190" SelectedIndex="0"
                             ToolTip="Filtrar por grupo ou ambiente" SelectionChanged="CameraGroupFilter_SelectionChanged">
                     <ComboBoxItem Content="Todos os grupos" Tag="*"/>
@@ -477,9 +479,8 @@
                     <Button Content="↓ Descer" Click="MoveCameraDown_Click" Margin="3"/>
                     <Button Content="Salvar" Style="{StaticResource PrimaryButton}" Click="SaveCameraProfile_Click" Margin="3"/>
                   </UniformGrid>
-                  <UniformGrid Columns="3" Margin="3,8,3,0">
+                  <UniformGrid Columns="2" Margin="3,8,3,0">
                     <Button Content="Testar conexão" Click="TestSelectedCamera_Click" Margin="0,0,4,0"/>
-                    <Button Content="Compatibilidade" Click="ShowCompatibilityTable_Click" Margin="4,0"/>
                     <Button Content="Remover localmente" Click="RemoveSelectedCamera_Click" Margin="4,0,0,0"/>
                   </UniformGrid>
                   <TextBlock x:Name="CameraSaveStatusText" Foreground="#42D67B" Margin="3,9,3,0" TextWrapping="Wrap"/>
