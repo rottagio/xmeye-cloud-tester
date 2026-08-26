@@ -48,6 +48,24 @@ Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromM
     "O login normal não preservou o intervalo mínimo de um minuto.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
+var profiles = new DeviceProfileStore();
+profiles.RecordCapability("camera-a", "SupportWifi", false, "SystemFunction: SupportWifi");
+profiles.RecordCapability("camera-a", "SupportPTZDirectionControl", true,
+    "SystemFunction: SupportPTZDirectionControl");
+Require(profiles.GetCapability("camera-a", "SupportWifi").State ==
+        DeviceProfileStore.CapabilityState.Unavailable,
+    "Uma resposta negativa da câmera foi confundida com recurso desconhecido.");
+Require(profiles.GetCapability("camera-a", "SupportPTZDirectionControl", "PTZ.Direction").State ==
+        DeviceProfileStore.CapabilityState.Available,
+    "A evidência positiva agregada de PTZ não foi preservada.");
+Require(profiles.GetCapability("camera-a", "SupportNtp").State ==
+        DeviceProfileStore.CapabilityState.Unknown,
+    "Um recurso não informado foi marcado como incompatível.");
+Require(DeviceCapabilityCatalog.Definitions.SelectMany(item => item.ProviderAliases)
+        .Contains("HumanDection", StringComparer.Ordinal),
+    "O catálogo perdeu a grafia legada usada por firmwares XMEye.");
+Console.WriteLine("DEVICE_CAPABILITY_PROFILE_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)

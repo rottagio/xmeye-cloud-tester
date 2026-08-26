@@ -11,6 +11,18 @@ namespace XMEyeCloudTester;
 /// </summary>
 internal sealed class DeviceProfileStore
 {
+    internal enum CapabilityState
+    {
+        Unknown,
+        Available,
+        Unavailable
+    }
+
+    internal sealed record CapabilitySnapshot(
+        CapabilityState State,
+        string Source,
+        DateTime? ObservedAtUtc);
+
     internal sealed class CapabilityEvidence
     {
         public bool Supported { get; set; }
@@ -173,6 +185,31 @@ internal sealed class DeviceProfileStore
             return false;
         supported = evidence.Supported;
         return true;
+    }
+
+    internal CapabilitySnapshot GetCapability(string deviceKey, params string[] capabilities)
+    {
+        if (!Devices.TryGetValue(deviceKey, out Profile? profile))
+            return new CapabilitySnapshot(CapabilityState.Unknown, string.Empty, null);
+
+        CapabilityEvidence[] current = capabilities
+            .Where(profile.Capabilities.ContainsKey)
+            .Select(key => profile.Capabilities[key])
+            .Where(evidence => string.Equals(evidence.Firmware, profile.Firmware, StringComparison.Ordinal))
+            .ToArray();
+        if (current.Length == 0)
+            return new CapabilitySnapshot(CapabilityState.Unknown, string.Empty, null);
+
+        CapabilityEvidence[] decisive = current.Any(evidence => evidence.Supported)
+            ? current.Where(evidence => evidence.Supported).ToArray()
+            : current;
+        return new CapabilitySnapshot(
+            decisive.Any(evidence => evidence.Supported)
+                ? CapabilityState.Available
+                : CapabilityState.Unavailable,
+            string.Join("; ", decisive.Select(evidence => evidence.Source)
+                .Where(source => source.Length > 0).Distinct(StringComparer.Ordinal)),
+            decisive.Max(evidence => (DateTime?)evidence.ObservedAtUtc));
     }
 
     internal string BuildTechnicalSummary(string deviceKey)

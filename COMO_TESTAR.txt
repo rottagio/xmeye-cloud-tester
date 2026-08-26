@@ -9,6 +9,11 @@ ICSEE/XMEYE MONITOR — TESTE RÁPIDO
 6. Abra Gravações para conferir miniaturas, reprodução e exclusão pela Lixeira.
 7. Abra Câmeras para alterar nome, ambiente, ordem, visibilidade e qualidade.
 8. Abra Configurações para ajustar reconexão, pastas e armazenamento.
+9. Em Câmeras, abra Compatibilidade: a coluna Identificação deve indicar o
+   progresso local sem piscar ou disparar consultas.
+10. Selecione câmeras de modelos diferentes e abra Configurações da câmera.
+    Confirme que Disponível, Não disponível e A identificar permanecem distintos
+    e que cada evidência mostra sua origem e data.
 
 O aplicativo restaura a sessão e o último layout automaticamente. Use Sair da
 conta para remover a sessão protegida, encerrar o motor nativo e isolar o perfil

@@ -419,6 +419,7 @@ public partial class MainWindow : Window
         public required string TwoWayTalk { get; init; }
         public required string Wifi { get; init; }
         public required string CloudUpgrade { get; init; }
+        public required string Inventory { get; init; }
         public required string Updated { get; init; }
     }
 
@@ -428,6 +429,8 @@ public partial class MainWindow : Window
         public required string Setting { get; init; }
         public required string Support { get; init; }
         public required string DataState { get; init; }
+        public required string Source { get; init; }
+        public required string Observed { get; init; }
     }
 
     public MainWindow()
@@ -4163,44 +4166,11 @@ public partial class MainWindow : Window
         // official keys (including legacy misspellings such as HumanDection).
         // Normalize only this response already received from SystemFunction; the
         // native JSON is never persisted because it can contain device metadata.
-        (string Canonical, string[] Aliases)[] capabilities =
-        [
-            ("SupportPTZDirectionControl",
-                ["SupportPTZDirectionControl"]),
-            ("SupportHumanDetection",
-                ["SupportHumanDetection", "SupportSmartAppHumanDetect",
-                 "HumanDection", "MotionHumanDection"]),
-            ("SupportDoubleLightCamera",
-                ["SupportDoubleLightCamera", "SupportDoubleLightBoxCamera",
-                 "SupportPCSetDoubleLight"]),
-            ("SupportAlarmSound",
-                ["SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound",
-                 "SupportAlarmVoiceTips", "SupportAlarmVoiceTipsType"]),
-            ("SupportMotionDetection",
-                ["SupportMotionDetection", "MotionDetect"]),
-            ("SupportMotionTracking",
-                ["SupportMotionTracking", "SupportDetectTrack"]),
-            ("SupportPtzPresets",
-                ["SupportPtzPresets", "SupportSetPTZPresetAttribute"]),
-            ("SupportPtzTour",
-                ["SupportPtzTour", "SupportPTZTour"]),
-            ("SupportTwoWayTalk",
-                ["SupportTwoWayTalk", "SupportTwoWayVoiceTalk", "Talk"]),
-            ("SupportWifi",
-                ["SupportWifi", "NetWifi"]),
-            ("SupportRtsp",
-                ["SupportRtsp", "NetRTSP"]),
-            ("SupportNtp",
-                ["SupportNtp", "NetNTP"]),
-            ("SupportCloudUpgradeConfig",
-                ["SupportCloudUpgradeConfig", "SupportCfgCloudupgrade",
-                 "SupportCloudUpgrade"])
-        ];
         bool changed = false;
-        foreach ((string canonical, string[] aliases) in capabilities)
-            if (TryFindAnyBoolean(root, aliases, out bool supported, out string matched))
+        foreach (DeviceCapabilityCatalog.Definition capability in DeviceCapabilityCatalog.Definitions)
+            if (TryFindAnyBoolean(root, capability.ProviderAliases, out bool supported, out string matched))
                 changed |= deviceProfiles.RecordCapability(
-                    cloudId, canonical, supported, "SystemFunction: " + matched);
+                    cloudId, capability.Key, supported, "SystemFunction: " + matched);
         changed |= deviceProfiles.RecordCapability(
             cloudId, "Identification.SystemFunctionSchema3", true, "SystemFunction");
         if (changed)
@@ -5630,40 +5600,53 @@ public partial class MainWindow : Window
 
         RefreshDeviceProfilesFromKnownData();
         deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
-        string Capability(params string[] keys)
+        DeviceProfileStore.CapabilitySnapshot CapabilitySnapshot(params string[] keys) =>
+            deviceProfiles.GetCapability(device.CloudId, keys);
+        static string CapabilityText(DeviceProfileStore.CapabilitySnapshot snapshot) => snapshot.State switch
         {
-            if (profile is null)
-                return "A identificar";
-            DeviceProfileStore.CapabilityEvidence[] evidence = keys
-                .Where(profile.Capabilities.ContainsKey)
-                .Select(key => profile.Capabilities[key])
-                .ToArray();
-            return evidence.Length == 0
-                ? "A identificar"
-                : evidence.Any(item => item.Supported) ? "Disponível" : "Não disponível";
-        }
-        string DetailedState(string support) => support == "Disponível"
-            ? "Compatibilidade identificada; detalhes ainda não lidos"
-            : support;
+            DeviceProfileStore.CapabilityState.Available => "Disponível",
+            DeviceProfileStore.CapabilityState.Unavailable => "Não disponível",
+            _ => "A identificar"
+        };
+        static string FriendlySource(string source) => string.IsNullOrWhiteSpace(source)
+            ? "Nenhuma evidência recebida"
+            : source.Replace("SystemFunction:", "Resposta da câmera:", StringComparison.Ordinal)
+                .Replace("SystemFunction + preview confirmado", "Resposta da câmera e imagem confirmada", StringComparison.Ordinal)
+                .Replace("SystemFunction", "Resposta da câmera", StringComparison.Ordinal);
+        static string ObservedText(DateTime? observedAtUtc) => observedAtUtc is DateTime observed
+            ? observed.ToLocalTime().ToString("dd/MM/yyyy HH:mm")
+            : "—";
         string Channels()
         {
             CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
             int? count = profile?.ConfirmedChannelCount ?? entry.DetectedChannelCount;
             return count is int value ? $"{value} confirmado(s)" : "A identificar";
         }
-        DeviceSettingRow Row(string section, string setting, string support, bool detailed = true) => new()
+        DeviceSettingRow Row(
+            string section, string setting, string support, string dataState,
+            string source = "Dados já recebidos", DateTime? observedAtUtc = null) => new()
         {
             Section = section,
             Setting = setting,
             Support = support,
-            DataState = detailed ? DetailedState(support) : "Dado local já recebido"
+            DataState = dataState,
+            Source = source,
+            Observed = ObservedText(observedAtUtc)
         };
+        DeviceSettingRow CapabilityRow(DeviceCapabilityCatalog.Definition definition)
+        {
+            DeviceProfileStore.CapabilitySnapshot snapshot = CapabilitySnapshot(definition.Key);
+            string support = CapabilityText(snapshot);
+            return Row(definition.Section, definition.Label, support,
+                snapshot.State == DeviceProfileStore.CapabilityState.Unknown
+                    ? "Ainda não informado pela câmera"
+                    : "Compatibilidade confirmada; detalhes não foram consultados",
+                FriendlySource(snapshot.Source), snapshot.ObservedAtUtc);
+        }
 
-        string ptz = Capability("SupportPTZDirectionControl", "PTZ.Direction");
-        string person = Capability("SupportHumanDetection");
-        string doubleLight = Capability(
-            "SupportDoubleLightCamera", "SupportCameraWhiteLight", "SupportDoubleLightBulb");
-        string sound = Capability("SupportAlarmSound", "SupportDVRAlarmSound", "SupportIPCAlarmSound");
+        DeviceProfileStore.CapabilitySnapshot doubleLightSnapshot =
+            CapabilitySnapshot("SupportDoubleLightCamera");
+        string doubleLight = CapabilityText(doubleLightSnapshot);
         PreviewBinding? online = previewBindings.Values.FirstOrDefault(candidate =>
             string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&
             confirmedPreviewWindows.ContainsKey(candidate.Window));
@@ -5708,52 +5691,46 @@ public partial class MainWindow : Window
                     $"{recording.EnabledSchedulePeriods} período(s); destino {targetText}";
             }
             string lightSummary = light is null
-                ? DetailedState(doubleLight)
+                ? doubleLightSnapshot.State == DeviceProfileStore.CapabilityState.Available
+                    ? "Compatibilidade confirmada; detalhes não foram consultados"
+                    : doubleLight
                 : $"Canal {light.Channel + 1}; modo {light.WorkMode}; nível {light.Level}; " +
                   $"duração {light.DurationSeconds}s; agenda {(light.ScheduleEnabled ? "ativa" : "inativa")}";
 
-            return
-            [
-                Row("Básicas", "Canais", Channels(), detailed: false),
+            var rows = new List<DeviceSettingRow>
+            {
+                Row("Básicas", "Canais", Channels(), "Dado local confirmado por imagem",
+                    "Catálogo local de canais"),
                 Row("Básicas", "Modelo e firmware", profile?.Firmware.Length > 0 || profile?.ReportedModel.Length > 0
-                    ? "Informado" : "Não informado pelo provedor", detailed: false),
-                Row("Vídeo e PTZ", "Movimento PTZ", ptz),
-                Row("Vídeo e PTZ", "Posições favoritas", Capability("SupportPtzPresets")),
-                Row("Vídeo e PTZ", "Ronda PTZ", Capability("SupportPtzTour")),
-                Row("Vídeo e PTZ", "Rastreamento de movimento", Capability("SupportMotionTracking")),
-                Row("Áudio", "Falar pela câmera", Capability("SupportTwoWayTalk")),
-                Row("Alarmes", "Detecção de movimento", Capability("SupportMotionDetection")),
-                Row("Alarmes", "Detecção de pessoa", person),
-                Row("Alarmes", "Aviso sonoro", sound),
-                new DeviceSettingRow
+                    ? "Informado" : "Não informado pelo provedor", "Dado recebido durante o cadastro",
+                    "Conta/CMS", profile?.UpdatedAtUtc),
+            };
+            foreach (DeviceCapabilityCatalog.Definition definition in DeviceCapabilityCatalog.Definitions)
+            {
+                if (definition.Key == "SupportDoubleLightCamera")
                 {
-                    Section = "Alarmes", Setting = "Luz branca / luz dupla",
-                    Support = light is null ? doubleLight : "Dados locais",
-                    DataState = lightSummary
-                },
-                Row("Rede", "Wi-Fi", Capability("SupportWifi")),
-                new DeviceSettingRow
-                {
-                    Section = "Rede", Setting = "Transporte da câmera",
-                    Support = "Cloud P2P",
-                    DataState = "Dado local; senhas e chaves de rede não são consultadas"
-                },
-                Row("Rede", "RTSP", Capability("SupportRtsp")),
-                Row("Rede", "Sincronização NTP", Capability("SupportNtp")),
-                new DeviceSettingRow
-                {
-                    Section = "Armazenamento", Setting = "Cartão e capacidade",
-                    Support = local.Storage is null ? "Leitura disponível" : "Dados locais",
-                    DataState = storageSummary
-                },
-                new DeviceSettingRow
-                {
-                    Section = "Gravação", Setting = "Plano e modo de gravação",
-                    Support = recording is null ? "Leitura disponível" : "Dados locais",
-                    DataState = recordingSummary
-                },
-                Row("Sistema", "Atualização pela nuvem", Capability("SupportCloudUpgradeConfig"))
-            ];
+                    rows.Add(Row("Alarmes", "Luz branca / luz dupla",
+                        light is null ? doubleLight : "Dados locais", lightSummary,
+                        light is null ? FriendlySource(doubleLightSnapshot.Source) : "Leitura solicitada e armazenada localmente",
+                        light?.ObservedAtUtc ?? doubleLightSnapshot.ObservedAtUtc));
+                    continue;
+                }
+                rows.Add(CapabilityRow(definition));
+            }
+            rows.AddRange(
+            [
+                Row("Rede", "Transporte da câmera", "Cloud P2P",
+                    "Senhas e chaves de rede não são consultadas", "Cadastro local"),
+                Row("Armazenamento", "Cartão e capacidade",
+                    local.Storage is null ? "Leitura disponível" : "Dados locais", storageSummary,
+                    local.Storage is null ? "Ainda não consultado" : "Leitura solicitada e armazenada localmente",
+                    local.Storage?.ObservedAtUtc),
+                Row("Gravação", "Plano e modo de gravação",
+                    recording is null ? "Leitura disponível" : "Dados locais", recordingSummary,
+                    recording is null ? "Ainda não consultado" : "Leitura solicitada e armazenada localmente",
+                    recording?.ObservedAtUtc)
+            ]);
+            return rows.ToArray();
         }
 
         var table = new DataGrid
@@ -5784,6 +5761,8 @@ public partial class MainWindow : Window
         AddSettingColumn(table, "Configuração", nameof(DeviceSettingRow.Setting), 235);
         AddSettingColumn(table, "Compatibilidade", nameof(DeviceSettingRow.Support), 190);
         AddSettingColumn(table, "Estado dos dados", nameof(DeviceSettingRow.DataState), 300);
+        AddSettingColumn(table, "Origem", nameof(DeviceSettingRow.Source), 260);
+        AddSettingColumn(table, "Confirmado em", nameof(DeviceSettingRow.Observed), 135);
 
         var layout = new Grid { Margin = new Thickness(20) };
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -5938,9 +5917,9 @@ public partial class MainWindow : Window
         {
             Owner = this,
             Title = "Configurações da câmera",
-            Width = 950,
+            Width = 1380,
             Height = 650,
-            MinWidth = 760,
+            MinWidth = 980,
             MinHeight = 460,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(8, 20, 33)),
@@ -6005,6 +5984,7 @@ public partial class MainWindow : Window
         AddColumn(table, "Falar", nameof(DeviceCompatibilityRow.TwoWayTalk), 85);
         AddColumn(table, "Wi-Fi", nameof(DeviceCompatibilityRow.Wifi), 85);
         AddColumn(table, "Upgrade cloud", nameof(DeviceCompatibilityRow.CloudUpgrade), 110);
+        AddColumn(table, "Identificação", nameof(DeviceCompatibilityRow.Inventory), 150);
         AddColumn(table, "Atualizado", nameof(DeviceCompatibilityRow.Updated), 125);
 
         var content = new Grid { Margin = new Thickness(20) };
@@ -6087,20 +6067,27 @@ public partial class MainWindow : Window
         deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
         CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
         string Capability(string key) =>
-            profile is not null && profile.Capabilities.TryGetValue(
-                key, out DeviceProfileStore.CapabilityEvidence? evidence)
-                ? evidence.Supported ? "Sim" : "Não"
-                : "?";
+            deviceProfiles.GetCapability(device.CloudId, key).State switch
+            {
+                DeviceProfileStore.CapabilityState.Available => "Sim",
+                DeviceProfileStore.CapabilityState.Unavailable => "Não",
+                _ => "?"
+            };
         string AnyCapability(params string[] keys)
         {
-            if (profile is null)
-                return "?";
-            DeviceProfileStore.CapabilityEvidence[] evidence = keys
-                .Where(profile.Capabilities.ContainsKey)
-                .Select(key => profile.Capabilities[key])
-                .ToArray();
-            return evidence.Length == 0 ? "?" : evidence.Any(item => item.Supported) ? "Sim" : "Não";
+            return deviceProfiles.GetCapability(device.CloudId, keys).State switch
+            {
+                DeviceProfileStore.CapabilityState.Available => "Sim",
+                DeviceProfileStore.CapabilityState.Unavailable => "Não",
+                _ => "?"
+            };
         }
+        int identifiedCapabilities = DeviceCapabilityCatalog.Definitions.Count(definition =>
+            deviceProfiles.GetCapability(device.CloudId, definition.Key).State !=
+                DeviceProfileStore.CapabilityState.Unknown);
+        bool inventoryCompleted = deviceProfiles.GetCapability(
+            device.CloudId, "Identification.SystemFunctionSchema3").State ==
+                DeviceProfileStore.CapabilityState.Available;
         int? channels = profile?.ConfirmedChannelCount ??
             (entry.ChannelCountOverride is 1 or 2 ? entry.ChannelCountOverride : entry.DetectedChannelCount);
         return new DeviceCompatibilityRow
@@ -6127,6 +6114,11 @@ public partial class MainWindow : Window
             TwoWayTalk = Capability("SupportTwoWayTalk"),
             Wifi = Capability("SupportWifi"),
             CloudUpgrade = Capability("SupportCloudUpgradeConfig"),
+            Inventory = inventoryCompleted
+                ? $"Concluída ({identifiedCapabilities}/{DeviceCapabilityCatalog.Definitions.Length})"
+                : identifiedCapabilities > 0
+                    ? $"Parcial ({identifiedCapabilities}/{DeviceCapabilityCatalog.Definitions.Length})"
+                    : "Aguardando imagem",
             Updated = profile is not null && profile.UpdatedAtUtc != default
                 ? profile.UpdatedAtUtc.ToLocalTime().ToString("dd/MM HH:mm")
                 : "—"

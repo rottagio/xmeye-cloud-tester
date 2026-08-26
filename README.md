@@ -25,6 +25,11 @@ motor CMS/Cloud P2P da Xiongmai.
 - biblioteca separada de vídeos e imagens, com miniaturas, reprodutor e exclusão
   recuperável pela Lixeira;
 - grupos/ambientes, apelidos locais, ordem, ocultação e serial mascarado;
+- perfil técnico individual por câmera, identificado automaticamente uma vez
+  após a primeira imagem, com origem e data de cada evidência;
+- painel de configurações por câmera que separa recurso disponível, recurso
+  negado pelo dispositivo e recurso ainda não informado. Abrir o painel ou a
+  tabela de compatibilidade não consulta a câmera;
 - tema claro/escuro, português/inglês, inicialização com o Windows, pastas e
   limite de armazenamento configuráveis;
 - diagnóstico exportável sem credenciais.
