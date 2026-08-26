@@ -13,14 +13,16 @@
     <AssemblyName>XMEyeCloudTester.App</AssemblyName>
     <RootNamespace>XMEyeCloudTester</RootNamespace>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
-    <Version>0.11.2</Version>
-    <AssemblyVersion>0.11.2.0</AssemblyVersion>
-    <FileVersion>0.11.2.0</FileVersion>
+    <Version>0.11.3</Version>
+    <AssemblyVersion>0.11.3.0</AssemblyVersion>
+    <FileVersion>0.11.3.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="QRCoder" Version="1.8.0" />
     <Compile Remove="Launcher\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
     <None Remove="Launcher\**\*" />
+    <None Remove="Tests\**\*" />
     <None Include="COMO_TESTAR.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="LEIA-ME.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="CloudServer" CopyToOutputDirectory="PreserveNewest" />

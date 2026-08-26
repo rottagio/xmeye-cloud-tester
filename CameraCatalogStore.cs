@@ -5,6 +5,9 @@ namespace XMEyeCloudTester;
 
 internal sealed class CameraCatalogStore
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int MigratedLegacyChannelDetections { get; private set; }
+
     internal sealed class Entry
     {
         public string Name { get; set; } = string.Empty;
@@ -76,15 +79,42 @@ internal sealed class CameraCatalogStore
                 File.ReadAllText(CatalogPath));
             if (loaded is null)
                 return new CameraCatalogStore();
-            foreach (Entry entry in loaded.Cameras.Values)
-                if (entry.DetectedChannelCount == 2 || entry.KnownChannels.Contains(1))
-                    entry.SecondaryChannelConfirmedEver = true;
+            loaded.MigratedLegacyChannelDetections = loaded.MigrateLegacyChannelDetections();
+            if (loaded.MigratedLegacyChannelDetections > 0)
+            {
+                try { loaded.Save(); }
+                catch { }
+            }
             return loaded;
         }
         catch
         {
             return new CameraCatalogStore();
         }
+    }
+
+    internal int MigrateLegacyChannelDetections()
+    {
+        int migrated = 0;
+        foreach (Entry entry in Cameras.Values)
+        {
+            if (entry.DetectedChannelCount == 2 || entry.KnownChannels.Contains(1))
+                entry.SecondaryChannelConfirmedEver = true;
+            // Releases anteriores podiam gravar "1 canal" sem nunca terem
+            // obtido uma segunda resposta negativa. Esse estado não satisfaz
+            // as regras atuais e bloquearia a descoberta para sempre.
+            if (entry.ChannelCountOverride is null &&
+                entry.DetectedChannelCount == 1 &&
+                !entry.SecondaryChannelConfirmedEver &&
+                !entry.KnownChannels.Contains(1) &&
+                entry.SecondaryChannelProbeFailures == 0 &&
+                entry.LastSecondaryChannelProbeFailureUtc is null)
+            {
+                entry.DetectedChannelCount = null;
+                migrated++;
+            }
+        }
+        return migrated;
     }
 
     public Entry GetOrCreate(CloudApi.AccountDevice device, int suggestedOrder)

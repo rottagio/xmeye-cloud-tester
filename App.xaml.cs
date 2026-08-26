@@ -2,12 +2,13 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using Microsoft.Win32;
 
 namespace XMEyeCloudTester;
 
 public partial class App : System.Windows.Application
 {
-    private const string AppUserModelId = "RottaGio.XMEyeCloudTester.Monitor";
+    private const string AppUserModelId = "RottaGio.XMEyeCloudTester.Monitor.V2";
     private Mutex? singleInstanceMutex;
     private bool restartAfterLogout;
 
@@ -30,11 +31,13 @@ public partial class App : System.Windows.Application
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 
+    [DllImport("shell32.dll")]
+    private static extern void SHChangeNotify(
+        uint eventId, uint flags, IntPtr item1, IntPtr item2);
+
     protected override void OnStartup(StartupEventArgs e)
     {
-        // Give the monitor its own stable Windows identity. Without an explicit
-        // identity, the taskbar can retain the launcher's old cached icon even
-        // after both executables have been replaced by the updater.
+        RegisterWindowsApplicationIdentity();
         _ = SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
 
         singleInstanceMutex = new Mutex(
@@ -51,6 +54,28 @@ public partial class App : System.Windows.Application
 
         AccountLogoutCleanupMessage = CloudSessionStore.CompletePendingLogout();
         base.OnStartup(e);
+    }
+
+    private static void RegisterWindowsApplicationIdentity()
+    {
+        try
+        {
+            string? executable = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(executable) || !File.Exists(executable))
+                return;
+            using RegistryKey key = Registry.CurrentUser.CreateSubKey(
+                $@"Software\Classes\AppUserModelId\{AppUserModelId}", writable: true);
+            key.SetValue("DisplayName", "iCSee/XMEye Monitor", RegistryValueKind.String);
+            key.SetValue("IconUri", executable + ",0", RegistryValueKind.String);
+            key.SetValue("IconBackgroundColor", "0", RegistryValueKind.String);
+            // SHCNE_ASSOCCHANGED: pede ao Explorer para reler a identidade e o
+            // ícone sem apagar todo o cache nem reiniciar a barra de tarefas.
+            SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+            // A janela ainda aplicará diretamente o ícone embutido no executável.
+        }
     }
 
     internal void RestartAfterAccountLogout()
