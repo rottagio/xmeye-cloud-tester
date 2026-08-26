@@ -278,7 +278,9 @@
                   </Border>
                   <Border BorderBrush="#29415D" BorderThickness="0,0,1,0" Margin="0,0,5,0">
                     <WrapPanel>
-                      <Button Style="{StaticResource ToolButton}" Content="↻ Reconectar" Click="ReconnectAll_Click"/>
+                      <Button x:Name="ReconnectFailedButton" Style="{StaticResource ToolButton}"
+                              Content="↻ Reconectar falhas" Click="ReconnectAll_Click"
+                              ToolTip="Tenta somente câmeras offline, uma por vez, respeitando os intervalos de proteção"/>
                       <Button x:Name="DisconnectButton" Style="{StaticResource ToolButton}" Content="Desconectar" IsEnabled="False" Click="Disconnect_Click"/>
                     </WrapPanel>
                   </Border>

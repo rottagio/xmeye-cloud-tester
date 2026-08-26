@@ -223,6 +223,7 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
+    private readonly SemaphoreSlim manualReconnectCycleGate = new(1, 1);
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
     private readonly ConcurrentDictionary<int, DeviceRequestProtection> deviceRequestProtections = new();
     private readonly ConcurrentDictionary<int, string> deviceCloudIds = new();
@@ -231,6 +232,7 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<string, byte> attemptedCapabilityDiscovery = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim capabilityDiscoveryGate = new(1, 1);
     private static readonly TimeSpan DeviceBlockCooldown = TimeSpan.FromHours(1);
+    private static readonly TimeSpan ManualReconnectSpacing = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan CapabilityDiscoveryInitialDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan CapabilityDiscoverySpacing = TimeSpan.FromSeconds(5);
     private const int SystemFunctionCommand = 1360;
@@ -329,6 +331,7 @@ public partial class MainWindow : Window
     private bool recordingTimelineUpdating;
     private LocalMediaItem? playingLocalMedia;
     private bool showRecordingMedia = true;
+    private DateTime lastManualReconnectCycleUtc = DateTime.MinValue;
     private int nextFloatingWindow = 40;
     private readonly HashSet<int> floatingPreviewWindows = [];
     private readonly Forms.ToolTip cameraToolTip = new()
@@ -4445,6 +4448,13 @@ public partial class MainWindow : Window
                         Log($"Reconexao suspensa por uma hora: dispositivo {binding.DeviceId}; nenhuma requisicao enviada.");
                         return;
                     }
+                    if (forceOneAttempt)
+                    {
+                        SetPreviewStatus(binding, "Offline", System.Drawing.Color.IndianRed);
+                        Log($"Tentativa manual encerrada sem login confirmado: dispositivo {binding.DeviceId}; " +
+                            $"canal {binding.Channel}; nenhuma repeticao automatica enviada.");
+                        return;
+                    }
                     Log($"Reconexao aguardando o monitor automatico do CMS; nova verificacao em " +
                         $"{Math.Ceiling(waitingDelay.TotalSeconds)}s: dispositivo {binding.DeviceId}; canal {binding.Channel}.");
                     await Task.Delay(waitingDelay);
@@ -4462,7 +4472,8 @@ public partial class MainWindow : Window
                 if (result != 0)
                 {
                     Stopwatch confirmation = Stopwatch.StartNew();
-                    while (confirmation.Elapsed < TimeSpan.FromSeconds(30))
+                    TimeSpan confirmationLimit = TimeSpan.FromSeconds(forceOneAttempt ? 15 : 30);
+                    while (confirmation.Elapsed < confirmationLimit)
                     {
                         if (isClosing ||
                             binding.Generation != Volatile.Read(ref previewGeneration) ||
@@ -4489,6 +4500,13 @@ public partial class MainWindow : Window
                 if (IsDeviceCooldownBlocked(binding.DeviceId))
                 {
                     SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    return;
+                }
+                if (forceOneAttempt)
+                {
+                    SetPreviewStatus(binding, "Offline", System.Drawing.Color.IndianRed);
+                    Log($"Tentativa manual sem imagem: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                        "nenhuma repeticao automatica enviada.");
                     return;
                 }
                 Log($"Preview ainda sem imagem; nova tentativa automatica em " +
@@ -6040,31 +6058,118 @@ public partial class MainWindow : Window
         WindowState = entering ? WindowState.Maximized : WindowState.Normal;
     }
 
-    private void ReconnectAll_Click(object sender, RoutedEventArgs e)
+    private async void ReconnectAll_Click(object sender, RoutedEventArgs e)
     {
-        if (selectedPreviewWindow >= 0 &&
-            previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? selected))
+        if (!await manualReconnectCycleGate.WaitAsync(0))
         {
-            if (!CanIssueDeviceRequest(selected.DeviceId, out TimeSpan wait, out _, out _))
-            {
-                string status = DeviceBlockStatus(selected.DeviceId);
-                SetPreviewStatus(selected, status, System.Drawing.Color.IndianRed);
-                Log($"Reconexao manual suprimida: {status}; restante {Math.Ceiling(wait.TotalMinutes)} min. Nenhuma requisicao enviada.");
-                System.Windows.MessageBox.Show(
-                    status + ". Nenhuma requisicao foi enviada.",
-                    "Protecao da camera", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-            Log($"Reconexao manual solicitada: dispositivo {selected.DeviceId}; " +
-                $"canal {selected.Channel}; janela {selected.Window}.");
-            disconnectedPreviewDevices.TryRemove(selected.DeviceId, out _);
-            _ = RecoverPreviewAsync(selected, forceOneAttempt: true);
+            SelectedCameraText.Text = "Um ciclo de reconexão já está em andamento";
             return;
         }
 
-        System.Windows.MessageBox.Show(
-            "Selecione uma camera antes de reconectar. Nenhuma requisicao foi enviada.",
-            "Reconectar camera", MessageBoxButton.OK, MessageBoxImage.Information);
+        bool cycleUsed = false;
+        try
+        {
+            TimeSpan minimumInterval = TimeSpan.FromSeconds(
+                Math.Max(60, preferences.ReconnectDelaySeconds));
+            TimeSpan sinceLastCycle = DateTime.UtcNow - lastManualReconnectCycleUtc;
+            if (lastManualReconnectCycleUtc != DateTime.MinValue && sinceLastCycle < minimumInterval)
+            {
+                TimeSpan remaining = minimumInterval - sinceLastCycle;
+                string message = $"Aguarde {Math.Ceiling(remaining.TotalSeconds)} segundos para um novo ciclo.";
+                SelectedCameraText.Text = message;
+                Log($"Ciclo manual global suprimido por intervalo minimo; restante " +
+                    $"{Math.Ceiling(remaining.TotalSeconds)}s. Nenhuma requisicao enviada.");
+                return;
+            }
+
+            PreviewBinding[] failed = previewBindings.Values
+                .Where(binding =>
+                    binding.Generation == Volatile.Read(ref previewGeneration) &&
+                    !confirmedPreviewWindows.ContainsKey(binding.Window))
+                .OrderBy(binding => binding.Window)
+                .ToArray();
+            if (failed.Length == 0)
+            {
+                SelectedCameraText.Text = "Todas as câmeras da grade já estão online";
+                Log("Ciclo manual global dispensado: nenhum fluxo offline; nenhuma requisicao enviada.");
+                return;
+            }
+
+            bool english = string.Equals(
+                preferences.Language, "en", StringComparison.OrdinalIgnoreCase);
+            ReconnectFailedButton.IsEnabled = false;
+            int processed = 0;
+            int recovered = 0;
+            int protectedOrBusy = 0;
+            Log($"Ciclo manual global iniciado: {failed.Length} fluxo(s) sem imagem; " +
+                "somente falhas serao avaliadas em sequencia.");
+
+            foreach (PreviewBinding binding in failed)
+            {
+                if (isClosing)
+                    break;
+                if (binding.Generation != Volatile.Read(ref previewGeneration) ||
+                    !previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) ||
+                    current != binding || confirmedPreviewWindows.ContainsKey(binding.Window))
+                    continue;
+                bool deviceAlreadyRecovering = previewBindings.Values.Any(candidate =>
+                    candidate.DeviceId == binding.DeviceId &&
+                    recoveringPreviewWindows.ContainsKey(candidate.Window));
+                if (deviceAlreadyRecovering)
+                {
+                    protectedOrBusy++;
+                    Log($"Ciclo manual: dispositivo {binding.DeviceId} ja possui recuperacao em andamento; " +
+                        $"canal {binding.Channel} ignorado para evitar chamadas concorrentes.");
+                    continue;
+                }
+                if (!CanIssueDeviceRequest(
+                        binding.DeviceId, out TimeSpan wait,
+                        out bool blockedByDevice, out int lastError))
+                {
+                    protectedOrBusy++;
+                    if (blockedByDevice)
+                        SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
+                    Log($"Ciclo manual: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                        $"protegido apos erro {lastError}; restante {Math.Ceiling(wait.TotalSeconds)}s; " +
+                        "nenhuma requisicao enviada.");
+                    continue;
+                }
+
+                processed++;
+                cycleUsed = true;
+                ReconnectFailedButton.Content = english
+                    ? $"↻  Reconnecting {processed}/{failed.Length}"
+                    : $"↻  Reconectando {processed}/{failed.Length}";
+                Log($"Ciclo manual: tentando dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                    $"janela {binding.Window}; item {processed}/{failed.Length}.");
+                await RecoverPreviewAsync(binding, forceOneAttempt: true);
+                if (confirmedPreviewWindows.ContainsKey(binding.Window))
+                    recovered++;
+
+                if (!isClosing && processed < failed.Length)
+                    await Task.Delay(ManualReconnectSpacing);
+            }
+
+            SelectedCameraText.Text = processed == 0
+                ? $"{protectedOrBusy} câmera(s) aguardando proteção ou já reconectando"
+                : $"Ciclo concluído: {recovered} recuperada(s) em {processed} tentativa(s)";
+            Log($"Ciclo manual global concluido: candidatas {failed.Length}; tentadas {processed}; " +
+                $"recuperadas {recovered}; protegidas ou ocupadas {protectedOrBusy}.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Falha no ciclo manual global: {ex.GetType().Name}: {ex.Message}");
+            SelectedCameraText.Text = "Não foi possível concluir o ciclo de reconexão";
+        }
+        finally
+        {
+            if (cycleUsed)
+                lastManualReconnectCycleUtc = DateTime.UtcNow;
+            ReconnectFailedButton.IsEnabled = true;
+            ReconnectAllButtonText(string.Equals(
+                preferences.Language, "en", StringComparison.OrdinalIgnoreCase));
+            manualReconnectCycleGate.Release();
+        }
     }
 
     private void PreferenceChanged_Click(object sender, RoutedEventArgs e)
@@ -6222,11 +6327,9 @@ public partial class MainWindow : Window
 
     private void ReconnectAllButtonText(bool english)
     {
-        // Mantém o texto curto; os estados e diagnósticos técnicos continuam em português.
-        foreach (System.Windows.Controls.Button button in FindVisualChildren<System.Windows.Controls.Button>(this))
-            if ((button.Content?.ToString() ?? string.Empty).Contains("Reconectar", StringComparison.OrdinalIgnoreCase) ||
-                (button.Content?.ToString() ?? string.Empty).Contains("Reconnect", StringComparison.OrdinalIgnoreCase))
-                button.Content = english ? "↻  Reconnect" : "↻  Reconectar";
+        ReconnectFailedButton.Content = english
+            ? "↻  Reconnect failures"
+            : "↻  Reconectar falhas";
     }
 
     private void ThemeChanged_Click(object sender, SelectionChangedEventArgs e)
