@@ -46,9 +46,8 @@ Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(true, 60) == TimeSpan.FromMi
     "O modo instável não limitou o login único do dispositivo.");
 Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromMinutes(1),
     "O login normal não preservou o intervalo mínimo de um minuto.");
-Require(ConnectionRecoveryPolicy.ChannelRetryDelay(15) == TimeSpan.FromMinutes(1) &&
-        ConnectionRecoveryPolicy.ChannelRetryDelay(300) == TimeSpan.FromMinutes(5),
-    "O supervisor de canal perdeu o intervalo mínimo ou o intervalo configurado.");
+Require(ConnectionRecoveryPolicy.PreviewSpacing == TimeSpan.FromSeconds(3),
+    "A restauração sequencial dos canais perdeu o espaçamento de proteção.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
 Require(new AppPreferences().AutoReconnect,
