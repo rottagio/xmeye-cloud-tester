@@ -9,9 +9,11 @@ internal sealed class AppPreferences
     // O VMS Pro usa autoRealPlay=false. Novas instalacoes aguardam uma acao
     // do usuario; perfis que optaram por restaurar esperam o monitor estabilizar.
     public bool RestoreLastLayout { get; set; } = false;
-    // Reconnection is opt-in. Some XM devices lock remote access after a burst
-    // of rejected P2P logins, so a fresh installation must never retry blindly.
-    public bool AutoReconnect { get; set; } = false;
+    // A recuperação permanece limitada pelas proteções do SDK e pelo intervalo
+    // configurado; novas instalações devem recuperar canais isolados sem exigir
+    // intervenção manual.
+    public bool AutoReconnect { get; set; } = true;
+    public int RecoveryPolicyVersion { get; set; } = 1;
     public bool DefaultSd { get; set; } = true;
     public int ConnectionTimeoutSeconds { get; set; } = 60;
     public int ReconnectDelaySeconds { get; set; } = 60;
@@ -52,10 +54,17 @@ internal sealed class AppPreferences
         {
             if (!File.Exists(SettingsPath))
                 return new AppPreferences();
-            AppPreferences? loaded = JsonSerializer.Deserialize<AppPreferences>(
-                File.ReadAllText(SettingsPath));
+            string json = File.ReadAllText(SettingsPath);
+            using JsonDocument document = JsonDocument.Parse(json);
+            bool hasRecoveryPolicyVersion = document.RootElement.TryGetProperty(
+                nameof(RecoveryPolicyVersion), out _);
+            AppPreferences? loaded = JsonSerializer.Deserialize<AppPreferences>(json);
             if (loaded is null || loaded.LastGridSize is not (1 or 4 or 9 or 16))
                 return new AppPreferences();
+            if (ApplyRecoveryPolicyMigration(loaded, hasRecoveryPolicyVersion))
+            {
+                loaded.Save();
+            }
             if (loaded.ConnectionTimeoutSeconds is not (30 or 60 or 90))
                 loaded.ConnectionTimeoutSeconds = 60;
             if (loaded.ReconnectDelaySeconds is not (60 or 120 or 300 or 900))
@@ -66,6 +75,19 @@ internal sealed class AppPreferences
         {
             return new AppPreferences();
         }
+    }
+
+    internal static bool ApplyRecoveryPolicyMigration(
+        AppPreferences preferences, bool hasPersistedVersion)
+    {
+        if (hasPersistedVersion)
+            return false;
+        // Versões anteriores podiam persistir AutoReconnect=false por causa do
+        // antigo modo de diagnóstico controlado. A migração é executada uma
+        // única vez; escolhas posteriores são respeitadas.
+        preferences.AutoReconnect = true;
+        preferences.RecoveryPolicyVersion = 1;
+        return true;
     }
 
     public void Save()

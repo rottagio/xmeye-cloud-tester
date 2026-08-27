@@ -600,7 +600,7 @@
               <TextBlock Text="Configurações" Foreground="White" FontSize="21" FontWeight="SemiBold"/>
               <CheckBox x:Name="RestoreLayoutBox" Content="Restaurar último layout" IsChecked="True"
                         Foreground="#CAD6E8" Margin="0,22,0,10" Click="PreferenceChanged_Click"/>
-              <CheckBox x:Name="AutoReconnectBox" Content="Reconexão ativa de canais isolados" IsChecked="False"
+              <CheckBox x:Name="AutoReconnectBox" Content="Reconexão ativa de canais isolados" IsChecked="True"
                         ToolTip="A retomada passiva após o sinal P2P voltar permanece protegida mesmo com esta opção desligada"
                         Foreground="#CAD6E8" Margin="0,0,0,10" Click="PreferenceChanged_Click"/>
               <CheckBox x:Name="StartWithWindowsBox" Content="Iniciar junto com o Windows"

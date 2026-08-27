@@ -103,11 +103,14 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> failedPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
+    private readonly ConcurrentDictionary<int, byte> supervisedPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> passiveRecoveryLocks = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> disconnectedRecoveryLocks = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceLoginAttemptLocks = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> previewRecoveryDeviceLocks = new();
+    private readonly ConcurrentDictionary<int, DateTime> lastPreviewRecoveryAttemptsUtc = new();
     private readonly ConcurrentDictionary<int, DeviceStabilityState> deviceStabilityStates = new();
     private readonly SemaphoreSlim manualReconnectCycleGate = new(1, 1);
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
@@ -4017,17 +4020,17 @@ public partial class MainWindow : Window
                 }
                 bool requestProtected = !CanIssueDeviceRequest(
                     pendingDeviceId, out _, out _, out _);
-                bool automaticRecovery = preferences.AutoReconnect && !requestProtected;
+                bool automaticRecovery = preferences.AutoReconnect;
                 SetPreviewStatus(
                     binding,
                     requestProtected ? DeviceBlockStatus(pendingDeviceId) :
                     automaticRecovery ? "Reconectando" : "Offline",
                     automaticRecovery ? System.Drawing.Color.Orange : System.Drawing.Color.IndianRed);
                 if (automaticRecovery)
-                    _ = RecoverPreviewAsync(binding);
+                    SchedulePreviewRecovery(binding, "canal não abriu durante a montagem da grade");
                 Log($"Grade: {device.Alias}; canal {channel + 1}; quadro {destinationWindow + 1}; " +
                     (automaticRecovery
-                        ? "vaga preservada para reconexao automatica protegida."
+                        ? "vaga preservada sob supervisao automatica protegida."
                         : "vaga preservada sem nova requisicao automatica."));
                 destinationWindow++;
                 reconnecting++;
@@ -4697,7 +4700,8 @@ public partial class MainWindow : Window
                     break;
                 if (!previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) ||
                     current != binding || confirmedPreviewWindows.ContainsKey(binding.Window) ||
-                    recoveringPreviewWindows.ContainsKey(binding.Window))
+                    recoveringPreviewWindows.ContainsKey(binding.Window) ||
+                    supervisedPreviewWindows.ContainsKey(binding.Window))
                     continue;
                 if (!CanIssueDeviceRequest(recoveredDeviceId, out _, out _, out _))
                     break;
@@ -4779,9 +4783,146 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private async Task RecoverPreviewAsync(PreviewBinding binding, bool forceOneAttempt = false)
+    private void SchedulePreviewRecovery(PreviewBinding binding, string reason)
     {
-        const int maximumAutomaticAttempts = 3;
+        if (isClosing || !preferences.AutoReconnect ||
+            binding.Generation != Volatile.Read(ref previewGeneration) ||
+            confirmedPreviewWindows.ContainsKey(binding.Window) ||
+            !previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) ||
+            current != binding)
+            return;
+        if (!supervisedPreviewWindows.TryAdd(binding.Window, 0))
+            return;
+
+        Log($"Supervisor de canal iniciado: dispositivo {binding.DeviceId}; " +
+            $"canal {binding.Channel}; janela {binding.Window}; motivo {reason}.");
+        _ = SupervisePreviewRecoveryAsync(binding);
+    }
+
+    private async Task SupervisePreviewRecoveryAsync(PreviewBinding binding)
+    {
+        SemaphoreSlim deviceGate = previewRecoveryDeviceLocks.GetOrAdd(
+            binding.DeviceId, _ => new SemaphoreSlim(1, 1));
+        try
+        {
+            while (IsPreviewRecoveryRequired(binding))
+            {
+                if (gridOpening)
+                {
+                    SetPreviewStatus(binding, "Aguardando conclusão da grade", System.Drawing.Color.Orange);
+                    await WaitForRecoveryWindowAsync(binding, TimeSpan.FromSeconds(1));
+                    continue;
+                }
+                if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                {
+                    SetPreviewStatus(binding, "Aguardando sinal P2P", System.Drawing.Color.Orange);
+                    await WaitForRecoveryWindowAsync(binding, TimeSpan.FromSeconds(5));
+                    continue;
+                }
+
+                if (!CanIssueDeviceRequest(
+                        binding.DeviceId, out TimeSpan protectedWait,
+                        out _, out int protectedError))
+                {
+                    SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.Orange);
+                    Log($"Supervisor de canal aguardando proteção: dispositivo {binding.DeviceId}; " +
+                        $"canal {binding.Channel}; erro {protectedError}; " +
+                        $"restante {Math.Ceiling(protectedWait.TotalSeconds)}s; nenhuma requisicao enviada.");
+                    await WaitForRecoveryWindowAsync(binding, protectedWait);
+                    continue;
+                }
+
+                await deviceGate.WaitAsync();
+                try
+                {
+                    if (!IsPreviewRecoveryRequired(binding))
+                        break;
+                    if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                        continue;
+                    if (!CanIssueDeviceRequest(
+                            binding.DeviceId, out protectedWait,
+                            out _, out protectedError))
+                    {
+                        Log($"Supervisor de canal encontrou nova proteção antes da tentativa: " +
+                            $"dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                            $"erro {protectedError}; nenhuma requisicao enviada.");
+                        continue;
+                    }
+
+                    if (lastPreviewRecoveryAttemptsUtc.TryGetValue(
+                            binding.DeviceId, out DateTime previousAttemptUtc))
+                    {
+                        TimeSpan spacing = ConnectionRecoveryPolicy.PreviewSpacing -
+                            (DateTime.UtcNow - previousAttemptUtc);
+                        if (spacing > TimeSpan.Zero)
+                            await WaitForRecoveryWindowAsync(binding, spacing);
+                    }
+                    if (!IsPreviewRecoveryRequired(binding))
+                        break;
+
+                    lastPreviewRecoveryAttemptsUtc[binding.DeviceId] = DateTime.UtcNow;
+                    await RecoverPreviewAsync(
+                        binding, maximumAutomaticAttempts: 1, supervisedAttempt: true);
+                }
+                finally
+                {
+                    deviceGate.Release();
+                }
+
+                if (!IsPreviewRecoveryRequired(binding))
+                    break;
+                TimeSpan retryDelay = ConnectionRecoveryPolicy.ChannelRetryDelay(
+                    preferences.ReconnectDelaySeconds);
+                SetPreviewStatus(
+                    binding,
+                    $"Nova tentativa em {Math.Ceiling(retryDelay.TotalSeconds)}s",
+                    System.Drawing.Color.Orange);
+                Log($"Supervisor de canal sem imagem: dispositivo {binding.DeviceId}; " +
+                    $"canal {binding.Channel}; nova tentativa em " +
+                    $"{Math.Ceiling(retryDelay.TotalSeconds)}s.");
+                await WaitForRecoveryWindowAsync(binding, retryDelay);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Supervisor de canal encerrado por erro: dispositivo {binding.DeviceId}; " +
+                $"canal {binding.Channel}; {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            supervisedPreviewWindows.TryRemove(binding.Window, out _);
+            if (confirmedPreviewWindows.ContainsKey(binding.Window))
+                Log($"Supervisor de canal concluido com imagem: dispositivo {binding.DeviceId}; " +
+                    $"canal {binding.Channel}; janela {binding.Window}.");
+        }
+    }
+
+    private bool IsPreviewRecoveryRequired(PreviewBinding binding) =>
+        !isClosing && preferences.AutoReconnect &&
+        binding.Generation == Volatile.Read(ref previewGeneration) &&
+        previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) &&
+        current == binding &&
+        !confirmedPreviewWindows.ContainsKey(binding.Window);
+
+    private async Task WaitForRecoveryWindowAsync(
+        PreviewBinding binding, TimeSpan duration)
+    {
+        DateTime limitUtc = DateTime.UtcNow + duration;
+        while (IsPreviewRecoveryRequired(binding) && DateTime.UtcNow < limitUtc)
+        {
+            TimeSpan remaining = limitUtc - DateTime.UtcNow;
+            await Task.Delay(remaining > TimeSpan.FromSeconds(5)
+                ? TimeSpan.FromSeconds(5)
+                : remaining);
+        }
+    }
+
+    private async Task RecoverPreviewAsync(
+        PreviewBinding binding,
+        bool forceOneAttempt = false,
+        int maximumAutomaticAttempts = 3,
+        bool supervisedAttempt = false)
+    {
         int attempt = 0;
         if (!recoveringPreviewWindows.TryAdd(binding.Window, 0))
             return;
@@ -4827,6 +4968,8 @@ public partial class MainWindow : Window
                     }
                     Log($"Reconexao aguardando o monitor automatico do CMS; nova verificacao em " +
                         $"{Math.Ceiling(waitingDelay.TotalSeconds)}s: dispositivo {binding.DeviceId}; canal {binding.Channel}.");
+                    if (supervisedAttempt)
+                        return;
                     await Task.Delay(waitingDelay);
                     continue;
                 }
@@ -4864,6 +5007,7 @@ public partial class MainWindow : Window
                         {
                             PreviewResourceLogger.Write(
                                 "confirmado", binding.DeviceId, binding.Window, attempt, result);
+                            activePreviewWindows.Add(binding.Window);
                             SetPreviewStatus(binding, "Online", System.Drawing.Color.LimeGreen);
                             QueueAutomaticCapabilityDiscovery(binding);
                             Log($"Preview recuperado com imagem: dispositivo {binding.DeviceId}; " +
@@ -4894,10 +5038,13 @@ public partial class MainWindow : Window
                 }
                 Log($"Preview ainda sem imagem; nova tentativa automatica em " +
                     $"{Math.Ceiling(retryDelay.TotalSeconds)}s: dispositivo {binding.DeviceId}; canal {binding.Channel}.");
+                if (supervisedAttempt)
+                    return;
                 await Task.Delay(retryDelay);
             }
 
-            if (preferences.AutoReconnect && attempt >= maximumAutomaticAttempts &&
+            if (!supervisedAttempt && preferences.AutoReconnect &&
+                attempt >= maximumAutomaticAttempts &&
                 binding.Generation == Volatile.Read(ref previewGeneration) &&
                 previewBindings.TryGetValue(binding.Window, out PreviewBinding? active) &&
                 active == binding)
@@ -7287,7 +7434,8 @@ public partial class MainWindow : Window
                 }
                 bool deviceAlreadyRecovering = previewBindings.Values.Any(candidate =>
                     candidate.DeviceId == binding.DeviceId &&
-                    recoveringPreviewWindows.ContainsKey(candidate.Window));
+                    (recoveringPreviewWindows.ContainsKey(candidate.Window) ||
+                     supervisedPreviewWindows.ContainsKey(candidate.Window)));
                 if (deviceAlreadyRecovering)
                 {
                     protectedOrBusy++;
@@ -7351,8 +7499,15 @@ public partial class MainWindow : Window
         if (!preferencesReady)
             return;
         preferences.RestoreLastLayout = RestoreLayoutBox.IsChecked == true;
+        bool recoveryWasEnabled = preferences.AutoReconnect;
         preferences.AutoReconnect = AutoReconnectBox.IsChecked == true;
         SavePreferences();
+        if (!recoveryWasEnabled && preferences.AutoReconnect)
+        {
+            foreach (PreviewBinding binding in previewBindings.Values.Where(binding =>
+                         !confirmedPreviewWindows.ContainsKey(binding.Window)))
+                SchedulePreviewRecovery(binding, "reconexão automática ativada pelo usuário");
+        }
     }
 
     private void PreferenceChanged_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -7697,6 +7852,7 @@ public partial class MainWindow : Window
             : CmsSdk.StreamType.Main;
         if (binding.StreamType == requested ||
             recoveringPreviewWindows.ContainsKey(binding.Window) ||
+            supervisedPreviewWindows.ContainsKey(binding.Window) ||
             binding.Generation != Volatile.Read(ref previewGeneration))
             return;
 
@@ -8046,6 +8202,7 @@ public partial class MainWindow : Window
             qtRuntime.ProcessEvents();
         }
         recoveringPreviewWindows.Clear();
+        supervisedPreviewWindows.Clear();
         if (log) Log("Vídeo desconectado.");
     }
 
@@ -8373,7 +8530,7 @@ public partial class MainWindow : Window
             {
                 Log($"Canal sem imagem detectado: janela {lostPreviewWindow}; iniciando reconexão automática.");
                 SetPreviewStatus(lostBinding, "Reconectando", System.Drawing.Color.Orange);
-                _ = RecoverPreviewAsync(lostBinding);
+                SchedulePreviewRecovery(lostBinding, "callback informou perda de imagem");
             }
         }));
     }

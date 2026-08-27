@@ -37,4 +37,7 @@ internal static class ConnectionRecoveryPolicy
         unstable
             ? UnstableDeviceLoginMinimum
             : TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
+
+    internal static TimeSpan ChannelRetryDelay(int configuredSeconds) =>
+        TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
 }

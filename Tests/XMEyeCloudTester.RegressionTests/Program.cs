@@ -46,7 +46,24 @@ Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(true, 60) == TimeSpan.FromMi
     "O modo instável não limitou o login único do dispositivo.");
 Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromMinutes(1),
     "O login normal não preservou o intervalo mínimo de um minuto.");
+Require(ConnectionRecoveryPolicy.ChannelRetryDelay(15) == TimeSpan.FromMinutes(1) &&
+        ConnectionRecoveryPolicy.ChannelRetryDelay(300) == TimeSpan.FromMinutes(5),
+    "O supervisor de canal perdeu o intervalo mínimo ou o intervalo configurado.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
+
+Require(new AppPreferences().AutoReconnect,
+    "Novas instalações deixaram de ativar a recuperação protegida de canais.");
+var legacyPreferences = new AppPreferences { AutoReconnect = false, RecoveryPolicyVersion = 0 };
+Require(AppPreferences.ApplyRecoveryPolicyMigration(
+            legacyPreferences, hasPersistedVersion: false) &&
+        legacyPreferences.AutoReconnect && legacyPreferences.RecoveryPolicyVersion == 1,
+    "Uma preferência legada deixou a recuperação automática desativada.");
+var currentPreferences = new AppPreferences { AutoReconnect = false, RecoveryPolicyVersion = 1 };
+Require(!AppPreferences.ApplyRecoveryPolicyMigration(
+            currentPreferences, hasPersistedVersion: true) &&
+        !currentPreferences.AutoReconnect,
+    "Uma escolha atual do usuário foi sobrescrita pela migração.");
+Console.WriteLine("AUTO_RECOVERY_DEFAULT_OK");
 
 Require(QtRuntime.IntervalFor(QtPumpState.Active) == TimeSpan.FromMilliseconds(25) &&
         QtRuntime.IntervalFor(QtPumpState.VisibleIdle) == TimeSpan.FromMilliseconds(100) &&
