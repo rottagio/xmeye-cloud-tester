@@ -49,7 +49,6 @@ public partial class MainWindow : Window
     private readonly List<Forms.Label> videoLabels = [];
     private readonly List<Forms.Label> videoBadges = [];
     private readonly List<Forms.Panel> videoContainers = [];
-    private readonly List<Forms.Panel> videoHoverPanels = [];
     private readonly HashSet<int> activePreviewWindows = [];
     private readonly ConcurrentDictionary<int, PreviewBinding> previewBindings = new();
     private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
@@ -57,12 +56,15 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, byte> recoveringPreviewWindows = new();
     private readonly ConcurrentDictionary<int, byte> disconnectedPreviewDevices = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> deviceReconnectLocks = new();
+    private readonly ConcurrentDictionary<int, byte> completeReconnectDevices = new();
+    private readonly ConcurrentDictionary<int, CameraInstabilityState> cameraInstability = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
     private readonly QtRuntime qtRuntime = new();
     private readonly List<CloudApi.AccountDevice> accountDevices = [];
     private readonly ConcurrentDictionary<int, int> automaticDeviceLoginResults = new();
     private readonly object diagnosticLock = new();
     private readonly string diagnosticPath;
+    private readonly string previewResourcePath;
     private readonly string diagnosticSession = Guid.NewGuid().ToString("N")[..8];
     private int deviceId;
     private bool playing;
@@ -100,10 +102,6 @@ public partial class MainWindow : Window
     {
         Interval = TimeSpan.FromMilliseconds(900)
     };
-    private readonly Forms.Timer cameraHoverTimer = new()
-    {
-        Interval = 220
-    };
     private bool onlineRefreshBusy;
     private bool gridOpening;
     private readonly Forms.Panel recordingPlaybackPanel = new()
@@ -133,6 +131,20 @@ public partial class MainWindow : Window
         int DeviceId, int Window, int Channel, CmsSdk.StreamType StreamType,
         string DisplayName, string CloudId, long Generation);
 
+    private sealed class CameraInstabilityState
+    {
+        internal readonly object Sync = new();
+        internal DateTime FirstLossUtc;
+        internal DateTime LastLossUtc;
+        internal DateTime LastCompleteReconnectUtc;
+        internal int LossCount;
+    }
+
+    private const int InstabilityMinimumLosses = 6;
+    private static readonly TimeSpan InstabilityDuration = TimeSpan.FromHours(1);
+    private static readonly TimeSpan InstabilityContinuityGap = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan CompleteReconnectCooldown = TimeSpan.FromHours(2);
+
     private sealed class LocalMediaItem : INotifyPropertyChanged
     {
         private string? thumbnailPath;
@@ -160,6 +172,7 @@ public partial class MainWindow : Window
             "XMEyeCloudAccountTester");
         Directory.CreateDirectory(diagnosticDirectory);
         diagnosticPath = Path.Combine(diagnosticDirectory, "diagnostic.log");
+        previewResourcePath = Path.Combine(diagnosticDirectory, "preview-resources.log");
         File.WriteAllText(diagnosticPath, string.Empty);
         sdkCallback = OnSdkMessage;
         InitializeComponent();
@@ -202,13 +215,13 @@ public partial class MainWindow : Window
             }
             RestoreConfiguredVideoGrid(onlyWhenChanged: true);
         };
-        cameraHoverTimer.Tick += (_, _) => UpdateCameraHoverControls();
-        cameraHoverTimer.Start();
         ConfigureVideoGrid(1);
         UpdateStreamQualityButtons();
         Loaded += OnLoaded;
         Closing += OnClosing;
+        StateChanged += (_, _) => UpdateQtPumpInterval();
         onlineRefreshTimer.Tick += async (_, _) => await RefreshOnlineDevicesAsync(false);
+        UpdateQtPumpInterval();
         Log($"Diagnostico iniciado: sessao {diagnosticSession}; versao {version.Major}.{version.Minor}.{version.Build}; " +
             $"Windows {Environment.OSVersion.Version}; processo {RuntimeInformation.ProcessArchitecture}.");
     }
@@ -222,10 +235,12 @@ public partial class MainWindow : Window
         {
             if (preferences.RestoreLastLayout && accountDevices.Count > 0)
                 await OpenGridAsync(preferences.LastGridSize);
+            UpdateQtPumpInterval();
             return;
         }
         RestoreManualCatalogDevices();
         await RefreshQrAsync();
+        UpdateQtPumpInterval();
     }
 
     private void InitializeSdk()
@@ -862,7 +877,6 @@ public partial class MainWindow : Window
         videoLabels.Clear();
         videoBadges.Clear();
         videoContainers.Clear();
-        videoHoverPanels.Clear();
         mirroredPreviewWindows.Clear();
         for (int index = 0; index < side * side; index++)
         {
@@ -908,38 +922,15 @@ public partial class MainWindow : Window
                 Visible = false,
                 Anchor = Forms.AnchorStyles.Top | Forms.AnchorStyles.Right
             };
-            var hover = new Forms.FlowLayoutPanel
-            {
-                AutoSize = false,
-                Width = 144,
-                Height = 68,
-                BackColor = System.Drawing.Color.FromArgb(215, 8, 20, 33),
-                FlowDirection = Forms.FlowDirection.LeftToRight,
-                Padding = new Forms.Padding(3),
-                Margin = Forms.Padding.Empty,
-                Visible = false,
-                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
-                WrapContents = true
-            };
-            AddHoverButton(hover, "🔊", "Ouvir/silenciar", () => ToggleAudio_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "🎙", "Falar", () => ToggleTalk_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "📷", "Fotografar", () => CaptureSelected_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "●", "Gravar", () => ToggleRecord_Click(this, new RoutedEventArgs()), window);
-            AddHoverButton(hover, "◀", "PTZ esquerda", () => SendPtzPulse(2), window);
-            AddHoverButton(hover, "▲", "PTZ acima", () => SendPtzPulse(0), window);
-            AddHoverButton(hover, "▼", "PTZ abaixo", () => SendPtzPulse(1), window);
-            AddHoverButton(hover, "▶", "PTZ direita", () => SendPtzPulse(3), window);
             container.Controls.Add(panel);
             container.Controls.Add(label);
             container.Controls.Add(badge);
-            container.Controls.Add(hover);
             Forms.ContextMenuStrip cameraMenu = CreatePreviewContextMenu(window);
             container.ContextMenuStrip = cameraMenu;
             panel.ContextMenuStrip = cameraMenu;
             label.ContextMenuStrip = cameraMenu;
             badge.ContextMenuStrip = cameraMenu;
-            hover.ContextMenuStrip = cameraMenu;
-            cameraToolTip.SetToolTip(panel, "Clique para selecionar; botão direito para áudio, gravação, PTZ, zoom e outras ações.");
+            cameraToolTip.SetToolTip(panel, "Clique para selecionar e abrir os controles; botão direito para outras ações.");
             cameraToolTip.SetToolTip(label, "Arraste para reorganizar; botão direito para controlar esta câmera.");
             void PositionBadge()
             {
@@ -947,10 +938,6 @@ public partial class MainWindow : Window
                 badge.Top = label.Height + 4;
                 if (badge.Visible)
                     badge.BringToFront();
-                hover.Left = Math.Max(2, container.ClientSize.Width - hover.Width - 5);
-                hover.Top = Math.Max(label.Height + 3, container.ClientSize.Height - hover.Height - 5);
-                if (hover.Visible)
-                    hover.BringToFront();
             }
             container.Resize += (_, _) => PositionBadge();
             PositionBadge();
@@ -968,7 +955,6 @@ public partial class MainWindow : Window
             videoLabels.Add(label);
             videoBadges.Add(badge);
             videoContainers.Add(container);
-            videoHoverPanels.Add(hover);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
         selectedPreviewWindow = -1;
@@ -987,58 +973,6 @@ public partial class MainWindow : Window
         PtzCameraText.Text = "Selecione uma câmera";
         SeparateWindowButton.IsEnabled = false;
         videoGrid.ResumeLayout(performLayout: true);
-    }
-
-    private void AddHoverButton(
-        Forms.FlowLayoutPanel host, string text, string tooltip, Action action, int window)
-    {
-        var button = new Forms.Button
-        {
-            Text = text,
-            Width = 31,
-            Height = 28,
-            FlatStyle = Forms.FlatStyle.Flat,
-            BackColor = System.Drawing.Color.FromArgb(24, 48, 75),
-            ForeColor = System.Drawing.Color.White,
-            Margin = new Forms.Padding(2),
-            Padding = Forms.Padding.Empty,
-            TabStop = false,
-            Cursor = Forms.Cursors.Hand
-        };
-        button.FlatAppearance.BorderColor = System.Drawing.Color.FromArgb(55, 91, 127);
-        button.Click += (_, _) =>
-        {
-            SelectPreviewWindow(window);
-            action();
-        };
-        cameraToolTip.SetToolTip(button, tooltip);
-        host.Controls.Add(button);
-    }
-
-    private void UpdateCameraHoverControls()
-    {
-        if (isClosing || videoContainers.Count != videoHoverPanels.Count)
-            return;
-        System.Drawing.Point cursor = Forms.Cursor.Position;
-        for (int window = 0; window < videoContainers.Count; window++)
-        {
-            Forms.Panel container = videoContainers[window];
-            bool show = container.Visible && previewBindings.ContainsKey(window) &&
-                container.RectangleToScreen(container.ClientRectangle).Contains(cursor);
-            if (videoHoverPanels[window].Visible != show)
-            {
-                videoHoverPanels[window].Visible = show;
-                if (show)
-                    videoHoverPanels[window].BringToFront();
-            }
-        }
-    }
-
-    private async void SendPtzPulse(int command)
-    {
-        SendPtzCommand(command, stop: false);
-        await Task.Delay(240);
-        StopPtzCommand();
     }
 
     private Forms.ContextMenuStrip CreatePreviewContextMenu(int window)
@@ -2001,49 +1935,55 @@ public partial class MainWindow : Window
     {
         try
         {
-        await Task.Delay(250, cancellationToken).ConfigureAwait(true);
-        foreach (LocalMediaItem item in items.Where(candidate =>
-                     candidate.IsRecording && string.IsNullOrWhiteSpace(candidate.ThumbnailPath)))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (playingLocalMedia is not null ||
-                recordingPlaybackPanel.Width < 20 || recordingPlaybackPanel.Height < 20)
-                return;
-            if (!recordingPlayer.Open(item.File.FullName, recordingPlaybackPanel.Handle, playSound: false))
-                continue;
-            await Task.Delay(700, cancellationToken).ConfigureAwait(true);
-            string cache = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "XMEyeCloudAccountTester", "thumbnails");
-            Directory.CreateDirectory(cache);
-            string keySource = $"{item.File.FullName}|{item.File.Length}|{item.File.LastWriteTimeUtc.Ticks}";
-            string key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                Encoding.UTF8.GetBytes(keySource)));
-            string destination = Path.Combine(cache, key + ".jpg");
-            try
+            await Task.Delay(250, cancellationToken).ConfigureAwait(true);
+            foreach (LocalMediaItem item in items.Where(candidate =>
+                         candidate.IsRecording && string.IsNullOrWhiteSpace(candidate.ThumbnailPath)))
             {
-                System.Drawing.Point origin = recordingPlaybackPanel.PointToScreen(System.Drawing.Point.Empty);
-                using var bitmap = new System.Drawing.Bitmap(
-                    recordingPlaybackPanel.ClientSize.Width,
-                    recordingPlaybackPanel.ClientSize.Height,
-                    System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                using (System.Drawing.Graphics graphics = System.Drawing.Graphics.FromImage(bitmap))
-                    graphics.CopyFromScreen(origin, System.Drawing.Point.Empty,
-                        recordingPlaybackPanel.ClientSize,
-                        System.Drawing.CopyPixelOperation.SourceCopy);
-                bitmap.Save(destination, System.Drawing.Imaging.ImageFormat.Jpeg);
-                item.ThumbnailPath = destination;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (playingLocalMedia is not null ||
+                    recordingPlaybackPanel.Width < 20 || recordingPlaybackPanel.Height < 20)
+                    return;
+                if (!recordingPlayer.Open(
+                        item.File.FullName, recordingPlaybackPanel.Handle, playSound: false))
+                    continue;
+                try
+                {
+                    await Task.Delay(700, cancellationToken).ConfigureAwait(true);
+                    string cache = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "XMEyeCloudAccountTester", "thumbnails");
+                    Directory.CreateDirectory(cache);
+                    string keySource =
+                        $"{item.File.FullName}|{item.File.Length}|{item.File.LastWriteTimeUtc.Ticks}";
+                    string key = Convert.ToHexString(
+                        System.Security.Cryptography.SHA256.HashData(
+                            Encoding.UTF8.GetBytes(keySource)));
+                    string destination = Path.Combine(cache, key + ".jpg");
+                    System.Drawing.Point origin = recordingPlaybackPanel.PointToScreen(
+                        System.Drawing.Point.Empty);
+                    using var bitmap = new System.Drawing.Bitmap(
+                        recordingPlaybackPanel.ClientSize.Width,
+                        recordingPlaybackPanel.ClientSize.Height,
+                        System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (System.Drawing.Graphics graphics =
+                           System.Drawing.Graphics.FromImage(bitmap))
+                        graphics.CopyFromScreen(origin, System.Drawing.Point.Empty,
+                            recordingPlaybackPanel.ClientSize,
+                            System.Drawing.CopyPixelOperation.SourceCopy);
+                    bitmap.Save(destination, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    item.ThumbnailPath = destination;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Log($"Miniatura local não gerada: {ex.Message}");
+                }
+                finally
+                {
+                    recordingPlayer.Close();
+                    recordingPlaybackPanel.Invalidate();
+                }
             }
-            catch (Exception ex)
-            {
-                Log($"Miniatura local não gerada: {ex.Message}");
-            }
-            finally
-            {
-                recordingPlayer.Close();
-                recordingPlaybackPanel.Invalidate();
-            }
-        }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log("Falha ao gerar miniaturas: " + SanitizeDiagnostic(ex.Message)); }
@@ -2747,6 +2687,7 @@ public partial class MainWindow : Window
         int attempt = 0;
         if (!recoveringPreviewWindows.TryAdd(binding.Window, 0))
             return;
+        UpdateQtPumpInterval();
         try
         {
             while (!isClosing &&
@@ -2763,8 +2704,14 @@ public partial class MainWindow : Window
                     $"Reconectando {attempt} • {DateTime.Now:HH:mm:ss}",
                     System.Drawing.Color.Orange);
                 await EnsureDeviceLoginForRecoveryAsync(binding, attempt);
+                WritePreviewResourceSnapshot("antes", binding, attempt);
+                // A primeira chamada sem StopPreview é intencional: quando apenas
+                // o fluxo oscila, ela rearma o vídeo sem derrubar a sessão ativa.
+                // Não inserir StopPreview entre tentativas sem que os registros de
+                // recursos comprovem crescimento nativo no SDK fechado.
                 int result = CmsSdk.CMS_Client_StartPreview(
                     binding.DeviceId, binding.Window, binding.Channel, binding.StreamType, false);
+                WritePreviewResourceSnapshot("depois-start", binding, attempt);
                 Log($"Recuperacao do preview: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
                     $"janela {binding.Window}; tentativa {attempt}; retorno {result}.");
                 if (result != 0)
@@ -2780,6 +2727,10 @@ public partial class MainWindow : Window
                         qtRuntime.ProcessEvents();
                         if (confirmedPreviewWindows.ContainsKey(binding.Window))
                         {
+                            WritePreviewResourceSnapshot("confirmado", binding, attempt);
+                            activePreviewWindows.Add(binding.Window);
+                            playing = true;
+                            DisconnectButton.IsEnabled = true;
                             SetPreviewStatus(binding, "Online", System.Drawing.Color.LimeGreen);
                             Log($"Preview recuperado com imagem: dispositivo {binding.DeviceId}; " +
                                 $"canal {binding.Channel}; janela {binding.Window}.");
@@ -2792,6 +2743,7 @@ public partial class MainWindow : Window
                         await Task.Delay(100);
                     }
                 }
+                WritePreviewResourceSnapshot("sem-imagem", binding, attempt);
                 int retryDelay = Math.Max(1000, preferences.ReconnectDelaySeconds * 1000);
                 Log($"Preview ainda sem imagem; nova tentativa automatica em {retryDelay / 1000}s: " +
                     $"dispositivo {binding.DeviceId}; canal {binding.Channel}.");
@@ -2801,6 +2753,123 @@ public partial class MainWindow : Window
         finally
         {
             recoveringPreviewWindows.TryRemove(binding.Window, out _);
+            UpdateQtPumpInterval();
+        }
+    }
+
+    private void WritePreviewResourceSnapshot(string stage, PreviewBinding binding, int attempt)
+    {
+        try
+        {
+            using Process process = Process.GetCurrentProcess();
+            process.Refresh();
+            string line =
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] RECURSOS preview: fase {stage}; " +
+                $"dispositivo {binding.DeviceId}; janela {binding.Window}; tentativa {attempt}; " +
+                $"working-set {process.WorkingSet64 / 1048576} MB; " +
+                $"privada {process.PrivateMemorySize64 / 1048576} MB; " +
+                $"threads {process.Threads.Count}; handles {process.HandleCount}.{Environment.NewLine}";
+            WriteDiagnosticLine(line);
+            lock (diagnosticLock)
+            {
+                if (File.Exists(previewResourcePath) &&
+                    new FileInfo(previewResourcePath).Length > 2 * 1024 * 1024)
+                    File.WriteAllText(previewResourcePath, string.Empty);
+                File.AppendAllText(previewResourcePath, line);
+            }
+        }
+        catch { }
+    }
+
+    private bool RegisterStreamInstability(int device)
+    {
+        DateTime now = DateTime.UtcNow;
+        CameraInstabilityState state = cameraInstability.GetOrAdd(
+            device, _ => new CameraInstabilityState());
+        lock (state.Sync)
+        {
+            if (state.LastLossUtc == default ||
+                now - state.LastLossUtc > InstabilityContinuityGap)
+            {
+                state.FirstLossUtc = now;
+                state.LossCount = 0;
+            }
+            state.LastLossUtc = now;
+            state.LossCount++;
+            bool prolonged = state.LossCount >= InstabilityMinimumLosses &&
+                now - state.FirstLossUtc >= InstabilityDuration;
+            bool cooldownFinished = state.LastCompleteReconnectUtc == default ||
+                now - state.LastCompleteReconnectUtc >= CompleteReconnectCooldown;
+            if (!prolonged || !cooldownFinished)
+                return false;
+
+            state.LastCompleteReconnectUtc = now;
+            state.FirstLossUtc = now;
+            state.LossCount = 0;
+            return true;
+        }
+    }
+
+    private async Task ForceCompleteDeviceReconnectAsync(int targetDevice)
+    {
+        UpdateQtPumpInterval();
+        try
+        {
+            PreviewBinding[] bindings = previewBindings.Values
+                .Where(binding => binding.DeviceId == targetDevice)
+                .OrderBy(binding => binding.Window)
+                .ToArray();
+            if (bindings.Length == 0)
+                return;
+
+            Log($"Câmera oscilando há pelo menos 1 hora; iniciando uma reconexão completa do dispositivo {targetDevice}.");
+            foreach (PreviewBinding binding in bindings)
+            {
+                SetPreviewStatus(binding, "Reconexão completa", System.Drawing.Color.OrangeRed);
+                activePreviewWindows.Remove(binding.Window);
+                confirmedPreviewWindows.TryRemove(binding.Window, out _);
+                failedPreviewWindows.TryRemove(binding.Window, out _);
+                try { CmsSdk.CMS_Client_StopPreviewByWnd(binding.Window, 0); }
+                catch { }
+            }
+            if (soundingPreviewWindow >= 0 &&
+                bindings.Any(binding => binding.Window == soundingPreviewWindow))
+            {
+                try { CmsSdk.CMS_Client_CloseSound(soundingPreviewWindow); }
+                catch { }
+                soundingPreviewWindow = -1;
+                audioDisplayPreviewWindow = -1;
+            }
+            if (talkingDeviceId == targetDevice)
+                StopActiveTalk();
+
+            await Task.Delay(1000);
+            qtRuntime.ProcessEvents();
+            if (isClosing || bindings.Any(binding =>
+                    binding.Generation != Volatile.Read(ref previewGeneration)))
+                return;
+
+            try { CmsSdk.CMS_Client_DeviceLoginOrLogout(targetDevice, false); }
+            catch { }
+            automaticDeviceLoginResults.TryRemove(targetDevice, out _);
+            disconnectedPreviewDevices[targetDevice] = 0;
+            await Task.Delay(1500);
+            qtRuntime.ProcessEvents();
+            if (isClosing || bindings.Any(binding =>
+                    binding.Generation != Volatile.Read(ref previewGeneration)))
+                return;
+
+            Log($"Reconexão completa: reautenticando o dispositivo {targetDevice} e reabrindo seus canais.");
+            await RecoverDevicePreviewsAsync(targetDevice, forceOneAttempt: true);
+        }
+        catch (Exception ex)
+        {
+            Log("Falha na reconexão completa automática: " + SanitizeDiagnostic(ex.Message));
+        }
+        finally
+        {
+            completeReconnectDevices.TryRemove(targetDevice, out _);
+            UpdateQtPumpInterval();
         }
     }
 
@@ -4351,7 +4420,9 @@ public partial class MainWindow : Window
         SetGridButtonsEnabled(false);
         accountDevices.Clear();
         automaticDeviceLoginResults.Clear();
+        cameraInstability.Clear();
         UpdateCameraSummary();
+        UpdateQtPumpInterval();
     }
 
     private void DisconnectVideo(bool log)
@@ -4414,6 +4485,7 @@ public partial class MainWindow : Window
         PtzSidePanel.IsEnabled = false;
         PtzCameraText.Text = "Selecione uma câmera";
         SeparateWindowButton.IsEnabled = false;
+        UpdateQtPumpInterval();
         if (log) Log("Vídeo desconectado.");
     }
 
@@ -4444,6 +4516,7 @@ public partial class MainWindow : Window
         AccountLoginButton.IsEnabled = !busy && sdkReady;
         RefreshCaptchaButton.IsEnabled = !busy && sdkReady;
         AccountLoginButton.Content = busy ? "CARREGANDO..." : "ENTRAR E CARREGAR CÂMERAS";
+        UpdateQtPumpInterval();
     }
 
     private void SetCameraBusy(bool busy)
@@ -4451,6 +4524,25 @@ public partial class MainWindow : Window
         OpenCameraButton.IsEnabled = !busy && DeviceBox.SelectedItem is CloudApi.AccountDevice;
         OpenCameraButton.Content = busy ? "CONECTANDO..." : "ABRIR CÂMERA SELECIONADA";
         SetGridButtonsEnabled(!busy && accountDevices.Count > 0);
+        UpdateQtPumpInterval();
+    }
+
+    private void UpdateQtPumpInterval()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke((Action)UpdateQtPumpInterval);
+            return;
+        }
+        bool active = gridOpening || qrBusy || onlineRefreshBusy ||
+            activePreviewWindows.Count > 0 || recoveringPreviewWindows.Count > 0 ||
+            completeReconnectDevices.Count > 0;
+        TimeSpan interval = active
+            ? TimeSpan.FromMilliseconds(25)
+            : WindowState == WindowState.Minimized
+                ? TimeSpan.FromMilliseconds(250)
+                : TimeSpan.FromMilliseconds(100);
+        qtRuntime.SetPumpInterval(interval);
     }
 
     private void SetGridButtonsEnabled(bool enabled)
@@ -4631,18 +4723,32 @@ public partial class MainWindow : Window
         }
         bool shouldRecoverDevice = preferences.AutoReconnect &&
             type == CmsSdk.MessageType.DeviceControl && p1 == 4 &&
+            !completeReconnectDevices.ContainsKey(p2) &&
             previewBindings.Values.Any(binding => binding.DeviceId == p2);
         bool shouldRecoverReturnedDevice = preferences.AutoReconnect &&
             type == CmsSdk.MessageType.DeviceControl && p1 == 3 && p4 > 0 &&
+            !completeReconnectDevices.ContainsKey(p2) &&
             disconnectedPreviewDevices.TryRemove(p2, out _);
-        bool shouldRecoverPreview = preferences.AutoReconnect && lostPreviewWindow >= 0;
+        bool hasLostPreview = preferences.AutoReconnect && lostPreviewWindow >= 0;
+        PreviewBinding? lostBindingForRecovery = hasLostPreview &&
+            previewBindings.TryGetValue(lostPreviewWindow, out PreviewBinding? candidate)
+            ? candidate
+            : null;
+        bool shouldForceCompleteReconnect = lostBindingForRecovery is not null &&
+            !completeReconnectDevices.ContainsKey(lostBindingForRecovery.DeviceId) &&
+            RegisterStreamInstability(lostBindingForRecovery.DeviceId) &&
+            completeReconnectDevices.TryAdd(lostBindingForRecovery.DeviceId, 0);
+        bool shouldRecoverPreview = lostBindingForRecovery is not null &&
+            (shouldForceCompleteReconnect ||
+             !completeReconnectDevices.ContainsKey(lostBindingForRecovery.DeviceId));
         // Native text is deliberately excluded because some SDK messages may
         // contain device metadata. Only non-sensitive numeric diagnostics are logged.
         WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
         bool needsUiUpdate =
             type == CmsSdk.MessageType.VideoWindowControl && p1 is 0 or 7 or 27 ||
             type == CmsSdk.MessageType.DeviceControl && p1 is 3 or 4 ||
-            shouldRecoverDevice || shouldRecoverReturnedDevice || shouldRecoverPreview;
+            shouldRecoverDevice || shouldRecoverReturnedDevice || shouldRecoverPreview ||
+            shouldForceCompleteReconnect;
         if (!needsUiUpdate)
             return;
         Dispatcher.BeginInvoke((Action)(() =>
@@ -4675,17 +4781,21 @@ public partial class MainWindow : Window
                 }
                 UpdateCameraSummary();
             }
-            if (shouldRecoverDevice || shouldRecoverReturnedDevice)
+            if (shouldForceCompleteReconnect && lostBindingForRecovery is not null)
+            {
+                _ = ForceCompleteDeviceReconnectAsync(lostBindingForRecovery.DeviceId);
+            }
+            else if (shouldRecoverDevice || shouldRecoverReturnedDevice)
             {
                 Log($"Dispositivo {p2} perdeu ou retomou a sessão; reabrindo os previews associados.");
                 _ = RecoverDevicePreviewsAsync(p2);
             }
             else if (shouldRecoverPreview &&
-                     previewBindings.TryGetValue(lostPreviewWindow, out PreviewBinding? lostBinding))
+                     lostBindingForRecovery is not null)
             {
                 Log($"Canal sem imagem detectado: janela {lostPreviewWindow}; iniciando reconexão automática.");
-                SetPreviewStatus(lostBinding, "Reconectando", System.Drawing.Color.Orange);
-                _ = RecoverPreviewAsync(lostBinding);
+                SetPreviewStatus(lostBindingForRecovery, "Reconectando", System.Drawing.Color.Orange);
+                _ = RecoverPreviewAsync(lostBindingForRecovery);
             }
         }));
     }
@@ -4695,7 +4805,6 @@ public partial class MainWindow : Window
         isClosing = true;
         onlineRefreshTimer.Stop();
         layoutRestoreTimer.Stop();
-        cameraHoverTimer.Stop();
         recordingPlaybackTimer.Stop();
         recordingThumbnailCts?.Cancel();
         recordingPlayer.Dispose();

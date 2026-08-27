@@ -30,6 +30,12 @@ internal sealed class QtRuntime : IDisposable
 
     internal void ProcessEvents() => QCoreApplicationProcessEvents(0, 1);
 
+    internal void SetPumpInterval(TimeSpan interval)
+    {
+        if (eventPump is not null && eventPump.Interval != interval)
+            eventPump.Interval = interval;
+    }
+
     private void PumpEvents(object? sender, EventArgs e) => ProcessEvents();
 
     public void Dispose()

@@ -11,12 +11,13 @@ motor CMS/Cloud P2P da Xiongmai.
 - cadastro individual por QR da câmera, Cloud ID ou IP/porta;
 - grades de 1, 4, 9 e 16 quadros, com ordem e último layout persistidos;
 - detecção dos canais que realmente entregam imagem;
-- estados Online, Offline e Reconectando, com recuperação automática;
+- estados Online, Offline e Reconectando, com recuperação suave do fluxo e
+  reconexão completa após uma hora de oscilação frequente;
 - qualidade SD/HD por câmera e indicação P2P ou rede local;
 - áudio, fala, PTZ/zoom, captura, gravação local, rotação, espelhamento local e
   janela separada, conforme o recurso suportado pelo dispositivo;
-- painel PTZ fixo com direções corrigidas, posições favoritas e controles rápidos
-  sobre cada vídeo;
+- painel PTZ fixo com direções corrigidas e posições favoritas; clicar em um
+  vídeo seleciona a câmera e habilita seus controles;
 - barra responsiva com ações agrupadas e botões SD/HD, inclusive em janelas
   menores;
 - preferências por câmera para rastreamento, sensibilidade, tempo/posição,
@@ -27,7 +28,8 @@ motor CMS/Cloud P2P da Xiongmai.
 - grupos/ambientes, apelidos locais, ordem, ocultação e serial mascarado;
 - tema claro/escuro, português/inglês, inicialização com o Windows, pastas e
   limite de armazenamento configuráveis;
-- diagnóstico exportável sem credenciais.
+- diagnóstico exportável sem credenciais e histórico numérico de memória,
+  threads e handles durante recuperações do preview.
 
 ## Primeiro uso
 
