@@ -4345,9 +4345,12 @@ public partial class MainWindow : Window
         {
             if (result > 0)
             {
-                // Um callback positivo passivo nao cancela a quarentena. O
-                // primeiro pedido do app so pode ocorrer apos o prazo completo.
-                if (protection.LastError is -27 or -25 &&
+                // O monitor nativo confirmar a sessão significa que o limite
+                // transitório -25 já foi superado; manter essa proteção faria a
+                // grade ignorar uma câmera que acabou de responder online. O -27
+                // continua preservado porque é bloqueio explícito do dispositivo.
+                if (ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(
+                        protection.LastError) &&
                     protection.NextAllowedUtc > DateTime.UtcNow)
                     return;
                 protection.ConsecutiveFailures = 0;

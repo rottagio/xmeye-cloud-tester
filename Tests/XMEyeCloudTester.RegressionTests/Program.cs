@@ -51,6 +51,9 @@ Require(ConnectionRecoveryPolicy.PreviewSpacing == TimeSpan.FromSeconds(3),
 Require(ConnectionRecoveryPolicy.ChannelRetryDelay(15) == TimeSpan.FromMinutes(1) &&
         ConnectionRecoveryPolicy.ChannelRetryDelay(300) == TimeSpan.FromMinutes(5),
     "A repetição protegida do canal perdeu o intervalo configurado.");
+Require(!ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(-25) &&
+        ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(-27),
+    "O callback online não distingue limite transitório de bloqueio do dispositivo.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
 Require(new AppPreferences().AutoReconnect,
