@@ -51,6 +51,28 @@ jobs:
           Copy-Item .\bin\Release\net8.0-windows\win-x64\QRCoder.dll '.\release-patch\!QRCoder.dll'
           Copy-Item .\XMEyeBridge.dll '.\release-patch\!XMEyeBridge.dll'
           Copy-Item .\CloudServer '.\release-patch\!CloudServer'
+          $required = @(
+            'XMEyeCloudTester.exe',
+            'XMEyeCloudTester.dll',
+            'XMEyeCloudTester.App.exe',
+            'XMEyeCloudTester.App.dll',
+            'XMEyeCloudTester.App.deps.json',
+            'QRCoder.dll',
+            'XMEyeBridge.dll',
+            'CloudServer'
+          )
+          foreach ($name in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path '.\release-patch' $name))) {
+              throw "Pacote incompleto: $name ausente"
+            }
+          }
+          $launcherVersion = [Reflection.AssemblyName]::GetAssemblyName(
+            (Resolve-Path '.\release-patch\XMEyeCloudTester.dll')).Version.ToString(3)
+          $appVersion = [Reflection.AssemblyName]::GetAssemblyName(
+            (Resolve-Path '.\release-patch\XMEyeCloudTester.App.dll')).Version.ToString(3)
+          if ($launcherVersion -ne $version -or $appVersion -ne $version) {
+            throw "Versoes inconsistentes: release=$version launcher=$launcherVersion app=$appVersion"
+          }
           Compress-Archive -Path .\release-patch\* -DestinationPath .\XMEyeCloudTester-update.zip
 
       - name: Criar Release
