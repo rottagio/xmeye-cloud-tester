@@ -55,6 +55,10 @@ internal sealed class CameraCatalogStore
         public Dictionary<int, bool> PtzSupportedChannels { get; set; } = [];
         public Dictionary<int, bool> PtzMirrorChannels { get; set; } = [];
         public Dictionary<int, bool> PtzFlipChannels { get; set; } = [];
+        // Velocidade usada nos comandos PTZ deste aplicativo (1=lenta,
+        // 3=média, 5=rápida). Cinco preserva o comportamento das versões
+        // anteriores, que usavam esse valor fixo.
+        public int PtzSpeed { get; set; } = 5;
         // Erro -27: impede qualquer nova requisicao ao dispositivo durante uma
         // hora. Fica no catalogo para que fechar/reabrir o app nao contorne a
         // protecao e cause uma nova rajada de tentativas.

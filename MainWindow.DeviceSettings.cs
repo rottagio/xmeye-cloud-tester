@@ -275,7 +275,7 @@ public partial class MainWindow
         nested[name] = numeric ? JsonValue.Create(value ? 1 : 0) : JsonValue.Create(value);
     }
 
-    private void ShowFunctionalDeviceSettings(CloudApi.AccountDevice device)
+    private void ShowLegacyFunctionalDeviceSettings(CloudApi.AccountDevice device)
     {
         PreviewBinding? online = previewBindings.Values.FirstOrDefault(candidate =>
             string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&

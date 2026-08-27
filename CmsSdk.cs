@@ -146,10 +146,22 @@ internal static class CmsSdk
         int deviceId, int channel, int commandId,
         IntPtr buffer, int bufferSize, int timeout);
 
+    // Rota usada por CGlobalLogic::getDeviceConfig_By_Sync no VMS Pro x64.
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_GetDeviceConfig_V2(
+        int deviceId, int channel, int configType,
+        IntPtr buffer, int bufferSize, int timeout);
+
     // Assinatura confirmada no wrapper CGlobalLogic::saveDeviceConfig do VMS Pro x64.
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_SetDeviceConfig(
         int deviceId, int channel, int commandId,
+        IntPtr buffer, int bufferSize);
+
+    // Rota usada por CGlobalLogic::saveDeviceConfig_By_Sync no VMS Pro x64.
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SetDeviceConfig_V2(
+        int deviceId, int channel, int configType,
         IntPtr buffer, int bufferSize);
 
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]

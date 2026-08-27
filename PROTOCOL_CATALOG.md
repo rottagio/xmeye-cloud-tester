@@ -2,6 +2,27 @@
 
 Este levantamento descreve o protocolo, não uma conta ou modelos específicos. Nenhum identificador, IP, usuário ou senha observado nos logs foi copiado para o código.
 
+## Configuração básica tipada (VMS Pro)
+
+A tela de configuração básica usa `CMS_Client_GetDeviceConfig_V2` e
+`CMS_Client_SetDeviceConfig_V2`, as mesmas rotas chamadas pelos wrappers
+síncronos do `CGlobalLogic` no VMS Pro. A interface recebe os bytes do buffer
+do callback; `netsdk.log` não é fonte de dados.
+
+| Bloco | Seletor de leitura | Seletor de escrita | Tamanho | Campos usados |
+|---|---:|---:|---:|---|
+| `GENERAL_CONFIG_BASE` | `0x103ED` | `0x103ED` | `0x5C` | `sMachineName` em `0x0C` |
+| `LOCATION_CONFIG_BASE` | `0x103EE` | — | `0x70` | `szLanguage` em `0x08` (consulta) |
+| `SDK_CameraParam` | `0x5E` | `0x5E` | `0x54` | flip `0x28`, mirror `0x2C`, DNC `0x3C` |
+| `ALL_VIDEO_VOLUME` | `0x1F8` | `0x1F8` | `0x1404` | saída em `0xA04`, volumes em `0xA24/0xA28` |
+| `SDK_TimeZone` | `0xA5` | `0xA5` | `0x08` | minutos a oeste em `0x00` |
+| `SDK_SYSTEM_TIME` | `0x103F3` | `0x2D` | `0x20` | oito inteiros de data/hora |
+
+Os layouts, tamanhos e seletores acima foram confirmados no PDB e no
+disassembly do `ConfigModule.dll` distribuído com o VMS Pro. Toda escrita parte
+de uma cópia integral do bloco lido, muda apenas os offsets listados e só é
+considerada concluída depois de uma nova leitura compatível.
+
 ## Estrutura confirmada
 
 | Função | Leitura | Gravação | Escopo |

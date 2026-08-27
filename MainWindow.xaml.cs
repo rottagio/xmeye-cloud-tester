@@ -2083,7 +2083,8 @@ public partial class MainWindow : Window
         }
         // VMS Pro keeps the configured PTZ speed in the third argument and
         // sends the preset number in the fourth argument for commands 17-19.
-        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, 5, value);
+        int speed = PtzSpeed(binding);
+        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, command, speed, value);
         SelectedCameraText.Text = result > 0
             ? $"Comando enviado: {description} {value}"
             : $"A câmera não confirmou: {description}";
@@ -2101,7 +2102,8 @@ public partial class MainWindow : Window
         if (!stop && !CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
             return;
         int nativeCommand = stop ? command : MapPtzDirection(binding, command);
-        int result = CmsSdk.CMS_Client_SendPTZCommand(selectedPreviewWindow, nativeCommand, 5, stop ? 1 : 0);
+        int result = CmsSdk.CMS_Client_SendPTZCommand(
+            selectedPreviewWindow, nativeCommand, PtzSpeed(binding), stop ? 1 : 0);
         if (!stop)
             activePtzCommand = nativeCommand;
         if (result <= 0)
@@ -3173,7 +3175,8 @@ public partial class MainWindow : Window
     }
 
     private async Task<byte[]?> RequestBinaryDeviceConfigAsync(
-        int targetDeviceId, int channel, int command, int bufferSize)
+        int targetDeviceId, int channel, int command, int bufferSize,
+        bool useTypedV2 = false, bool rememberTimeout = true)
     {
         var key = (targetDeviceId, command);
         if (pendingBinaryConfigReads.ContainsKey(key))
@@ -3197,8 +3200,14 @@ public partial class MainWindow : Window
 
         try
         {
-            int result = CmsSdk.CMS_Client_GetDeviceConfig(
-                targetDeviceId, channel, command, buffer, bufferSize, -1);
+            int result = useTypedV2
+                ? CmsSdk.CMS_Client_GetDeviceConfig_V2(
+                    targetDeviceId, channel, command, buffer, bufferSize, -1)
+                : CmsSdk.CMS_Client_GetDeviceConfig(
+                    targetDeviceId, channel, command, buffer, bufferSize, -1);
+            if (useTypedV2)
+                WriteDiagnosticLine(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] Configuração tipada: retorno imediato leitura tipo=0x{command:X}, retorno={result}.{Environment.NewLine}");
             if (result < 0 && pendingBinaryConfigReads.TryRemove(key, out PendingBinaryConfigRead? rejected))
             {
                 RecordDeviceRequestResult(targetDeviceId, result);
@@ -3221,7 +3230,8 @@ public partial class MainWindow : Window
         // callback tardio ou o fechamento do aplicativo faz a liberacao segura.
         if (completed == completion.Task)
             return await completion.Task.ConfigureAwait(false);
-        timedOutDetailedConfigDevices[targetDeviceId] = 0;
+        if (rememberTimeout)
+            timedOutDetailedConfigDevices[targetDeviceId] = 0;
         return null;
     }
 
@@ -3255,7 +3265,8 @@ public partial class MainWindow : Window
     }
 
     private async Task<int?> RequestBinaryDeviceConfigWriteAsync(
-        int targetDeviceId, int channel, int command, byte[] value)
+        int targetDeviceId, int channel, int command, byte[] value,
+        bool useTypedV2 = false)
     {
         var key = (targetDeviceId, command);
         if (pendingBinaryConfigReads.ContainsKey(key) || pendingBinaryConfigWrites.ContainsKey(key))
@@ -3271,8 +3282,14 @@ public partial class MainWindow : Window
         }
         try
         {
-            int accepted = CmsSdk.CMS_Client_SetDeviceConfig(
-                targetDeviceId, channel, command, buffer, value.Length);
+            int accepted = useTypedV2
+                ? CmsSdk.CMS_Client_SetDeviceConfig_V2(
+                    targetDeviceId, channel, command, buffer, value.Length)
+                : CmsSdk.CMS_Client_SetDeviceConfig(
+                    targetDeviceId, channel, command, buffer, value.Length);
+            if (useTypedV2)
+                WriteDiagnosticLine(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] Configuração tipada: retorno imediato gravação tipo=0x{command:X}, retorno={accepted}.{Environment.NewLine}");
             if (accepted < 0 &&
                 pendingBinaryConfigWrites.TryRemove(key, out PendingBinaryConfigWrite? rejected))
             {
@@ -4777,6 +4794,56 @@ public partial class MainWindow : Window
         SetVideoLoadingState(window, null);
         await Task.Delay(250);
         return false;
+    }
+
+    private int PtzSpeed(PreviewBinding binding)
+    {
+        CloudApi.AccountDevice? device = accountDevices.FirstOrDefault(candidate =>
+            string.Equals(candidate.CloudId, binding.CloudId, StringComparison.Ordinal));
+        if (device is null)
+            return 5;
+        int configured = cameraCatalog.GetOrCreate(device, int.MaxValue).PtzSpeed;
+        return configured is 1 or 3 or 5 ? configured : 5;
+    }
+
+    private async Task<byte[]?> ReadTypedDeviceConfigV2Async(
+        int targetDeviceId, int channel, int configType, int bufferSize)
+    {
+        await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+                return null;
+            WriteDiagnosticLine(
+                $"[{DateTime.Now:HH:mm:ss.fff}] Configuração tipada: leitura V2 tipo=0x{configType:X}, tamanho=0x{bufferSize:X}.{Environment.NewLine}");
+            return await RequestBinaryDeviceConfigAsync(
+                targetDeviceId, channel, configType, bufferSize,
+                useTypedV2: true, rememberTimeout: false).ConfigureAwait(false);
+        }
+        finally
+        {
+            deviceConfigIoGate.Release();
+        }
+    }
+
+    private async Task<int?> WriteTypedDeviceConfigV2Async(
+        int targetDeviceId, int channel, int configType, byte[] value)
+    {
+        await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+                return null;
+            WriteDiagnosticLine(
+                $"[{DateTime.Now:HH:mm:ss.fff}] Configuração tipada: gravação V2 tipo=0x{configType:X}, tamanho=0x{value.Length:X}.{Environment.NewLine}");
+            return await RequestBinaryDeviceConfigWriteAsync(
+                targetDeviceId, channel, configType, value, useTypedV2: true)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            deviceConfigIoGate.Release();
+        }
     }
 
     private void SchedulePreviewRecovery(PreviewBinding binding, string reason)

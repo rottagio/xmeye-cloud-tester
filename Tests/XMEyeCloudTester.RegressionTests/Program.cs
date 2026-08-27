@@ -27,6 +27,8 @@ Require(catalog.Cameras["confirmed-single"].DetectedChannelCount == 1,
 Require(catalog.Cameras["confirmed-double"].DetectedChannelCount == 2 &&
         catalog.Cameras["confirmed-double"].SecondaryChannelConfirmedEver,
     "Uma câmera de dois canais confirmada perdeu sua evidência.");
+Require(new CameraCatalogStore.Entry().PtzSpeed == 5,
+    "A velocidade PTZ padrão deixou de preservar o comportamento já publicado.");
 
 Console.WriteLine("CHANNEL_MIGRATION_REGRESSION_OK");
 
@@ -204,8 +206,63 @@ Require(DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(0) &&
     "A validação do nível de iluminação foi alterada.");
 Console.WriteLine("DEVICE_CONFIGURATION_WRITE_POLICY_OK");
 
+var basicGeneral = new byte[CameraBasicConfigurationCodec.GeneralSize];
+var basicLocation = new byte[CameraBasicConfigurationCodec.LocationSize];
+var basicCamera = new byte[CameraBasicConfigurationCodec.CameraParameterSize];
+var basicVolume = new byte[CameraBasicConfigurationCodec.VolumeSize];
+var basicTimeZone = new byte[CameraBasicConfigurationCodec.TimeZoneSize];
+var basicTime = new byte[CameraBasicConfigurationCodec.TimeSize];
+WriteNativeString(basicGeneral, 0x0C, 0x40, "Corredor");
+WriteNativeString(basicLocation, 0x08, 0x20, "Portuguese");
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicCamera.AsSpan(0x28, 4), 1);
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicCamera.AsSpan(0x2C, 4), 0);
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicCamera.AsSpan(0x3C, 4), 5);
+basicVolume[1] = 1;
+WriteNativeString(basicVolume, 0xA04, 0x20, "Single");
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicVolume.AsSpan(0xA24, 4), 50);
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicVolume.AsSpan(0xA28, 4), 50);
+System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(basicTimeZone.AsSpan(0, 4), 180);
+int[] timeParts = [2026, 8, 27, 4, 16, 43, 30, 0];
+for (int index = 0; index < timeParts.Length; index++)
+    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(
+        basicTime.AsSpan(index * 4, 4), timeParts[index]);
+
+Require(CameraBasicConfigurationCodec.TryCreateSnapshot(
+        basicGeneral, basicLocation, basicCamera, basicVolume, basicTimeZone, basicTime,
+        out CameraBasicConfigurationCodec.Snapshot? basicSnapshot, out string basicError) &&
+    basicSnapshot is not null,
+    $"O codec tipado não leu uma resposta básica válida: {basicError}");
+CameraBasicConfigurationCodec.Snapshot verifiedBasic = basicSnapshot!;
+Require(verifiedBasic.MachineName == "Corredor" && verifiedBasic.Language == "Portuguese" &&
+        verifiedBasic.PictureFlip && !verifiedBasic.PictureMirror &&
+        verifiedBasic.DayNightSensitivity == 5 && verifiedBasic.LeftVolume == 50 &&
+        verifiedBasic.RightVolume == 50 && verifiedBasic.MinutesWest == 180,
+    "O codec tipado interpretou um campo básico no offset errado.");
+byte[] renamed = CameraBasicConfigurationCodec.WithMachineName(verifiedBasic.General, "Entrada");
+Require(renamed.AsSpan(0, 0x0C).SequenceEqual(verifiedBasic.General.AsSpan(0, 0x0C)) &&
+        renamed.AsSpan(0x4C).SequenceEqual(verifiedBasic.General.AsSpan(0x4C)),
+    "A atualização do nome alterou bytes fora do campo comprovado.");
+byte[] changedCamera = CameraBasicConfigurationCodec.WithCameraParameters(
+    verifiedBasic.CameraParameters, true, false, 7);
+Require(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(changedCamera.AsSpan(0x2C, 4)) == 1 &&
+        System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(changedCamera.AsSpan(0x28, 4)) == 0 &&
+        System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(changedCamera.AsSpan(0x3C, 4)) == 7,
+    "A cópia de parâmetros básicos não alterou somente os campos solicitados.");
+Require(CameraBasicConfigurationCodec.GeneralType == 0x103ED &&
+        CameraBasicConfigurationCodec.LocationType == 0x103EE &&
+        CameraBasicConfigurationCodec.CameraParameterType == 0x5E &&
+        CameraBasicConfigurationCodec.VolumeType == 0x1F8,
+    "Os seletores tipados confirmados do VMS foram alterados.");
+Console.WriteLine("TYPED_BASIC_CONFIGURATION_CODEC_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)
         throw new InvalidOperationException(message);
+}
+
+static void WriteNativeString(byte[] buffer, int offset, int length, string value)
+{
+    byte[] encoded = System.Text.Encoding.UTF8.GetBytes(value);
+    encoded.CopyTo(buffer.AsSpan(offset, length));
 }

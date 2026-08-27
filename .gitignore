@@ -19,3 +19,4 @@ official-runtime/
 *.lib
 *.exp
 tools/
+.tools/
