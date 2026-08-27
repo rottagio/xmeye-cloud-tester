@@ -251,6 +251,7 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, PtzCapabilityState> ptzCapabilities = new();
     private readonly ConcurrentDictionary<(int DeviceId, int Command), IntPtr> pendingPtzConfigBuffers = new();
     private readonly ConcurrentDictionary<(int DeviceId, int Command), PendingBinaryConfigRead> pendingBinaryConfigReads = new();
+    private readonly ConcurrentDictionary<(int DeviceId, int Command), PendingBinaryConfigWrite> pendingBinaryConfigWrites = new();
     private readonly ConcurrentDictionary<int, byte> timedOutDetailedConfigDevices = new();
     private readonly ConcurrentDictionary<(string DeviceKey, string Section, int Channel), byte> attemptedDetailedConfigReads = new();
     private readonly SemaphoreSlim detailedConfigReadGate = new(1, 1);
@@ -378,6 +379,15 @@ public partial class MainWindow : Window
         internal required int Size;
         internal required TaskCompletionSource<byte[]?> Completion;
     }
+
+    private sealed class PendingBinaryConfigWrite
+    {
+        internal required IntPtr Buffer;
+        internal required TaskCompletionSource<int?> Completion;
+    }
+
+    private sealed record ConfigurationWriteResult(
+        bool Success, bool RolledBack, string Message);
 
     private sealed class LocalMediaItem : INotifyPropertyChanged
     {
@@ -3457,6 +3467,75 @@ public partial class MainWindow : Window
         pending.Completion.TrySetResult(bytes);
     }
 
+    private async Task<int?> RequestBinaryDeviceConfigWriteAsync(
+        int targetDeviceId, int channel, int command, byte[] value)
+    {
+        var key = (targetDeviceId, command);
+        if (pendingBinaryConfigReads.ContainsKey(key) || pendingBinaryConfigWrites.ContainsKey(key))
+            return null;
+        IntPtr buffer = Marshal.AllocHGlobal(value.Length);
+        Marshal.Copy(value, 0, buffer, value.Length);
+        var completion = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new PendingBinaryConfigWrite { Buffer = buffer, Completion = completion };
+        if (!pendingBinaryConfigWrites.TryAdd(key, pending))
+        {
+            Marshal.FreeHGlobal(buffer);
+            return null;
+        }
+        try
+        {
+            int accepted = CmsSdk.CMS_Client_SetDeviceConfig(
+                targetDeviceId, channel, command, buffer, value.Length);
+            if (accepted < 0 &&
+                pendingBinaryConfigWrites.TryRemove(key, out PendingBinaryConfigWrite? rejected))
+            {
+                Marshal.FreeHGlobal(rejected.Buffer);
+                rejected.Completion.TrySetResult(accepted);
+            }
+        }
+        catch
+        {
+            if (pendingBinaryConfigWrites.TryRemove(key, out PendingBinaryConfigWrite? rejected))
+            {
+                Marshal.FreeHGlobal(rejected.Buffer);
+                rejected.Completion.TrySetResult(null);
+            }
+        }
+
+        Task completed = await Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromSeconds(20)))
+            .ConfigureAwait(false);
+        return completed == completion.Task
+            ? await completion.Task.ConfigureAwait(false)
+            : null;
+    }
+
+    private void HandleBinaryDeviceConfigWriteResponse(int result, int targetDeviceId, int command)
+    {
+        if (!pendingBinaryConfigWrites.TryRemove(
+                (targetDeviceId, command), out PendingBinaryConfigWrite? pending))
+            return;
+        if (pending.Buffer != IntPtr.Zero)
+            Marshal.FreeHGlobal(pending.Buffer);
+        pending.Completion.TrySetResult(result);
+    }
+
+    private async Task<int?> WriteSerializedBinaryConfigAsync(
+        int targetDeviceId, int channel, int command, byte[] value)
+    {
+        await deviceConfigIoGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!CanIssueDeviceRequest(targetDeviceId, out _, out _, out _))
+                return null;
+            return await RequestBinaryDeviceConfigWriteAsync(
+                targetDeviceId, channel, command, value).ConfigureAwait(false);
+        }
+        finally
+        {
+            deviceConfigIoGate.Release();
+        }
+    }
+
     private async Task<byte[]?> ReadSerializedBinaryConfigAsync(
         int targetDeviceId, int channel, int command, int bufferSize)
     {
@@ -3727,6 +3806,112 @@ public partial class MainWindow : Window
             RecordMappedConfiguration(device, "Light.White",
                 $"CMS binário 0x{CameraLightConfigCommand:X}", parsed.ObservedAtUtc);
             return parsed;
+        }
+        finally
+        {
+            detailedConfigReadGate.Release();
+        }
+    }
+
+    private async Task<ConfigurationWriteResult> SetCameraLightLevelControlledAsync(
+        CloudApi.AccountDevice device, PreviewBinding online, int requestedLevel)
+    {
+        if (!DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(requestedLevel))
+            return new(false, false, "Nível fora do intervalo permitido (0 a 100).");
+        DeviceConfigurationCatalog.Definition? definition =
+            DeviceConfigurationCatalog.Find("Light.White");
+        if (definition is null)
+            return new(false, false, "Configuração ausente do catálogo técnico.");
+
+        await detailedConfigReadGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            byte[]? original = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, CameraLightConfigSize)
+                .ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.LightInfo? before = original is null
+                ? null
+                : ParseCameraLightInfo(online.Channel, original);
+            deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
+            DeviceProfileStore.ConfigurationBinding? binding = null;
+            profile?.CompatibleCommands.TryGetValue("Light.White", out binding);
+            if (!DeviceConfigurationWritePolicy.CanWrite(
+                    definition, binding, before is not null, DateTime.UtcNow,
+                    out TimeSpan wait, out string denied))
+            {
+                string suffix = wait > TimeSpan.Zero
+                    ? $" Aguarde {Math.Max(1, Math.Ceiling(wait.TotalSeconds))} segundo(s)."
+                    : string.Empty;
+                return new(false, false, denied + suffix);
+            }
+            if (original is null || before is null)
+                return new(false, false, "A câmera não forneceu um valor inicial validável.");
+            if (before.Level == requestedLevel)
+                return new(true, false, "A câmera já está configurada com este nível.");
+
+            byte[] proposed = (byte[])original.Clone();
+            BinaryPrimitives.WriteInt32LittleEndian(proposed.AsSpan(68, 4), requestedLevel);
+            DateTime writeAtUtc = DateTime.UtcNow;
+            if (deviceProfiles.RecordConfigurationWrite(
+                    device.CloudId, "Light.White", writeAtUtc))
+                SaveDeviceProfiles();
+            int? writeResult = await WriteSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, proposed)
+                .ConfigureAwait(false);
+            if (writeResult is null)
+                return new(false, false,
+                    "O SDK não confirmou a alteração. Nenhuma repetição ou restauração automática foi enviada.");
+            if (writeResult < 0)
+                return new(false, false, $"A câmera recusou a alteração (código {writeResult}).");
+
+            await Task.Delay(1200).ConfigureAwait(false);
+            byte[]? verifiedBytes = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, CameraLightConfigSize)
+                .ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.LightInfo? verified = verifiedBytes is null
+                ? null
+                : ParseCameraLightInfo(online.Channel, verifiedBytes);
+            if (verified is null)
+                return new(false, false,
+                    "A gravação foi aceita, mas a leitura de confirmação não respondeu. Não repita agora.");
+            if (verified.Level == requestedLevel)
+            {
+                DeviceReadOnlyConfigStore.DeviceData cache =
+                    readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+                cache.LightByChannel[online.Channel] = verified;
+                readOnlyDeviceConfigs.Save();
+                RecordMappedConfiguration(device, "Light.White",
+                    $"CMS binário 0x{CameraLightConfigCommand:X}; escrita validada",
+                    verified.ObservedAtUtc);
+                return new(true, false,
+                    $"Nível alterado de {before.Level} para {verified.Level} e confirmado pela câmera.");
+            }
+
+            // A câmera respondeu com outro valor: restaura exatamente o bloco
+            // original uma única vez e valida a restauração, sem loop.
+            int? rollbackResult = await WriteSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, original)
+                .ConfigureAwait(false);
+            if (rollbackResult is null || rollbackResult < 0)
+                return new(false, false,
+                    "A validação divergiu e a câmera não confirmou a restauração automática.");
+            await Task.Delay(1200).ConfigureAwait(false);
+            byte[]? rollbackBytes = await ReadSerializedBinaryConfigAsync(
+                online.DeviceId, online.Channel, CameraLightConfigCommand, CameraLightConfigSize)
+                .ConfigureAwait(false);
+            DeviceReadOnlyConfigStore.LightInfo? rollback = rollbackBytes is null
+                ? null
+                : ParseCameraLightInfo(online.Channel, rollbackBytes);
+            bool restored = rollback?.Level == before.Level;
+            if (restored && rollback is not null)
+            {
+                readOnlyDeviceConfigs.GetOrCreate(device.CloudId)
+                    .LightByChannel[online.Channel] = rollback;
+                readOnlyDeviceConfigs.Save();
+            }
+            return new(false, restored, restored
+                ? "A câmera não manteve o novo valor; o valor anterior foi restaurado e confirmado."
+                : "A câmera não manteve o novo valor e a restauração não pôde ser confirmada.");
         }
         finally
         {
@@ -5961,9 +6146,17 @@ public partial class MainWindow : Window
             IsEnabled = doubleLight == "Disponível" ||
                 readOnlyDeviceConfigs.GetOrCreate(device.CloudId).LightByChannel.Count > 0
         };
+        var editLightButton = new System.Windows.Controls.Button
+        {
+            Content = "Alterar nível da luz",
+            Padding = new Thickness(14, 8, 14, 8),
+            Margin = new Thickness(8, 0, 0, 0),
+            IsEnabled = false
+        };
         actions.Children.Add(storageButton);
         actions.Children.Add(recordingButton);
         actions.Children.Add(lightButton);
+        actions.Children.Add(editLightButton);
         DockPanel.SetDock(actions, Dock.Right);
         footer.Children.Add(actions);
         Grid.SetRow(footer, 2);
@@ -5993,6 +6186,7 @@ public partial class MainWindow : Window
             storageButton.IsEnabled = false;
             recordingButton.IsEnabled = false;
             lightButton.IsEnabled = false;
+            editLightButton.IsEnabled = false;
             return true;
         }
 
@@ -6011,6 +6205,13 @@ public partial class MainWindow : Window
             lightButton.Content = lightLoaded ? "Iluminação carregada" : "Carregar iluminação";
             lightButton.IsEnabled = !lightLoaded && doubleLight == "Disponível" && (channel < 0 ||
                 !attemptedDetailedConfigReads.ContainsKey((device.CloudId, "Light", channel)));
+            DeviceProfileStore.ConfigurationBinding? lightBinding = null;
+            profile?.CompatibleCommands.TryGetValue("Light.White", out lightBinding);
+            bool writeAllowed = channel >= 0 && lightLoaded &&
+                DeviceConfigurationCatalog.Find("Light.White") is DeviceConfigurationCatalog.Definition lightDefinition &&
+                DeviceConfigurationWritePolicy.CanWrite(
+                    lightDefinition, lightBinding, true, DateTime.UtcNow, out _, out _);
+            editLightButton.IsEnabled = writeAllowed;
         }
 
         RestoreReadButtons();
@@ -6049,6 +6250,104 @@ public partial class MainWindow : Window
             status.Text = result is null
                 ? "A câmera não retornou dados válidos. Nenhuma repetição automática será feita."
                 : "Configuração de iluminação carregada e mantida no cache local.";
+            RestoreReadButtons();
+        };
+        editLightButton.Click += async (_, _) =>
+        {
+            online = previewBindings.Values.FirstOrDefault(candidate =>
+                string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&
+                confirmedPreviewWindows.ContainsKey(candidate.Window));
+            if (online is null ||
+                !readOnlyDeviceConfigs.GetOrCreate(device.CloudId).LightByChannel.TryGetValue(
+                    online.Channel, out DeviceReadOnlyConfigStore.LightInfo? currentLight))
+            {
+                status.Text = "Carregue a iluminação com a câmera online antes de alterar.";
+                RestoreReadButtons();
+                return;
+            }
+
+            var levelDialog = new Window
+            {
+                Owner = this,
+                Title = "Nível da luz branca",
+                Width = 430,
+                Height = 245,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(8, 20, 33))
+            };
+            var levelPanel = new StackPanel { Margin = new Thickness(22) };
+            var levelText = new TextBlock
+            {
+                Text = $"Nível: {currentLight.Level}",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 18,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            var levelSlider = new System.Windows.Controls.Slider
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = currentLight.Level,
+                TickFrequency = 5,
+                IsSnapToTickEnabled = true
+            };
+            levelSlider.ValueChanged += (_, _) => levelText.Text = $"Nível: {(int)levelSlider.Value}";
+            var warning = new TextBlock
+            {
+                Text = "A alteração será enviada uma vez, relida e validada. Em divergência, o valor anterior será restaurado uma vez.",
+                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188)),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 12)
+            };
+            var levelActions = new StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+            };
+            var cancelLevel = new System.Windows.Controls.Button
+            {
+                Content = "Cancelar", IsCancel = true, Padding = new Thickness(15, 7, 15, 7)
+            };
+            var applyLevel = new System.Windows.Controls.Button
+            {
+                Content = "Continuar", IsDefault = true, Padding = new Thickness(15, 7, 15, 7),
+                Margin = new Thickness(8, 0, 0, 0)
+            };
+            applyLevel.Click += (_, _) => levelDialog.DialogResult = true;
+            levelActions.Children.Add(cancelLevel);
+            levelActions.Children.Add(applyLevel);
+            levelPanel.Children.Add(levelText);
+            levelPanel.Children.Add(levelSlider);
+            levelPanel.Children.Add(warning);
+            levelPanel.Children.Add(levelActions);
+            levelDialog.Content = levelPanel;
+            if (levelDialog.ShowDialog() != true)
+                return;
+
+            int requestedLevel = (int)levelSlider.Value;
+            if (requestedLevel == currentLight.Level)
+            {
+                status.Text = "O nível não foi alterado.";
+                return;
+            }
+            if (System.Windows.MessageBox.Show(this,
+                    $"Alterar o nível da luz de '{device.Alias}', canal {online.Channel + 1}, " +
+                    $"de {currentLight.Level} para {requestedLevel}?\n\n" +
+                    "Será enviada uma única alteração ao dispositivo.",
+                    "Confirmar alteração remota", MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            storageButton.IsEnabled = false;
+            recordingButton.IsEnabled = false;
+            lightButton.IsEnabled = false;
+            editLightButton.IsEnabled = false;
+            status.Text = "Alterando e validando a iluminação...";
+            ConfigurationWriteResult result = await SetCameraLightLevelControlledAsync(
+                device, online, requestedLevel);
+            RefreshRows();
+            status.Text = result.Message;
             RestoreReadButtons();
         };
 
@@ -7541,6 +7840,14 @@ public partial class MainWindow : Window
         if (isClosing)
             return;
         if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
+            pendingBinaryConfigWrites.ContainsKey((p2, p4)))
+        {
+            RecordDeviceRequestResult(p2, p1);
+            HandleBinaryDeviceConfigWriteResponse(p1, p2, p4);
+            WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: gravação {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
+            return;
+        }
+        if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
             pendingBinaryConfigReads.ContainsKey((p2, p4)))
         {
             // Nesta build do CMS: p1=resultado, p2=deviceId, p3=canal, p4=comando.
@@ -7693,6 +8000,14 @@ public partial class MainWindow : Window
         foreach (var pending in pendingBinaryConfigReads.ToArray())
         {
             if (!pendingBinaryConfigReads.TryRemove(pending.Key, out PendingBinaryConfigRead? request))
+                continue;
+            if (request.Buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(request.Buffer);
+            request.Completion.TrySetResult(null);
+        }
+        foreach (var pending in pendingBinaryConfigWrites.ToArray())
+        {
+            if (!pendingBinaryConfigWrites.TryRemove(pending.Key, out PendingBinaryConfigWrite? request))
                 continue;
             if (request.Buffer != IntPtr.Zero)
                 Marshal.FreeHGlobal(request.Buffer);

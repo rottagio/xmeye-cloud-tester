@@ -146,6 +146,12 @@ internal static class CmsSdk
         int deviceId, int channel, int commandId,
         IntPtr buffer, int bufferSize, int timeout);
 
+    // Assinatura confirmada no wrapper CGlobalLogic::saveDeviceConfig do VMS Pro x64.
+    [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CMS_Client_SetDeviceConfig(
+        int deviceId, int channel, int commandId,
+        IntPtr buffer, int bufferSize);
+
     [DllImport("CMSClient.dll", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CMS_Client_RemoveDevice(int deviceId);
 

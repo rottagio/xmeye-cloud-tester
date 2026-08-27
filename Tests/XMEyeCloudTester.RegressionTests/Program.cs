@@ -135,6 +135,33 @@ Require(DeviceSettingsPresentationPolicy.OfferSafeProbe("Storage.Info") &&
     "A tela ofereceu uma sondagem fora da lista segura.");
 Console.WriteLine("DEVICE_SETTINGS_PRESENTATION_POLICY_OK");
 
+DeviceConfigurationCatalog.Definition lightDefinition =
+    DeviceConfigurationCatalog.Find("Light.White")!;
+DeviceConfigurationCatalog.Definition networkDefinition =
+    DeviceConfigurationCatalog.Find("Network.Wifi")!;
+var lightBinding = new DeviceProfileStore.ConfigurationBinding { Supported = true };
+Require(DeviceConfigurationWritePolicy.CanWrite(
+        lightDefinition, lightBinding, true, DateTime.UtcNow, out _, out _),
+    "A alteração controlada de iluminação confirmada foi recusada.");
+Require(!DeviceConfigurationWritePolicy.CanWrite(
+        networkDefinition, new DeviceProfileStore.ConfigurationBinding { Supported = true },
+        true, DateTime.UtcNow, out _, out _),
+    "Uma alteração sensível de rede foi liberada.");
+Require(!DeviceConfigurationWritePolicy.CanWrite(
+        lightDefinition, new DeviceProfileStore.ConfigurationBinding { Supported = false },
+        true, DateTime.UtcNow, out _, out _),
+    "Uma câmera incompatível recebeu permissão de escrita.");
+lightBinding.LastWriteAtUtc = DateTime.UtcNow;
+Require(!DeviceConfigurationWritePolicy.CanWrite(
+        lightDefinition, lightBinding, true, DateTime.UtcNow, out TimeSpan writeWait, out _) &&
+        writeWait > TimeSpan.FromMinutes(1),
+    "O intervalo entre alterações remotas não foi aplicado.");
+Require(DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(0) &&
+        DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(100) &&
+        !DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(101),
+    "A validação do nível de iluminação foi alterada.");
+Console.WriteLine("DEVICE_CONFIGURATION_WRITE_POLICY_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)

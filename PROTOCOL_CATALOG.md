@@ -61,4 +61,22 @@ A tela **Configurações da câmera** é montada a partir do perfil do dispositi
 - omite recursos incompatíveis ou ainda desconhecidos dos controles utilizáveis;
 - mantém visíveis apenas as sondagens seguras de armazenamento e gravação;
 - informa a quantidade de recursos confirmados, incompatíveis e ainda não identificados;
-- identifica recursos de leitura/gravação, mas mantém toda alteração remota desabilitada nesta etapa.
+- identifica recursos de leitura/gravação; somente editores liberados explicitamente pela política podem alterar o dispositivo.
+
+## Escrita controlada da versão 0.15
+
+A única alteração remota liberada é o **nível da luz branca**, e apenas quando a câmera confirmou `Camera.WhiteLight` e uma leitura inicial válida existe.
+
+Fluxo obrigatório:
+
+1. câmera com imagem online e fora de cooldown;
+2. leitura fresca do bloco completo;
+3. validação do nível entre 0 e 100;
+4. confirmação explícita do usuário mostrando câmera, canal, valor anterior e novo;
+5. uma única gravação pelo comando confirmado do VMS Pro;
+6. nova leitura após a gravação;
+7. sucesso somente se o dispositivo devolver o valor solicitado;
+8. se devolver outro valor, uma única restauração do bloco original e uma leitura de confirmação;
+9. se não houver resposta, nenhuma repetição ou restauração incerta é enviada.
+
+Há intervalo mínimo persistente de dois minutos entre alterações. Rede, firmware, formatação, alarmes e plano de gravação remoto permanecem bloqueados nesta versão.

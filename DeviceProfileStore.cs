@@ -44,6 +44,7 @@ internal sealed class DeviceProfileStore
         public string RequiredCapability { get; set; } = string.Empty;
         public string Evidence { get; set; } = string.Empty;
         public DateTime? ObservedAtUtc { get; set; }
+        public DateTime? LastWriteAtUtc { get; set; }
         public string Firmware { get; set; } = string.Empty;
     }
 
@@ -218,6 +219,19 @@ internal sealed class DeviceProfileStore
 
     internal bool RebuildConfigurationBindings(string deviceKey) =>
         RebuildConfigurationBindings(GetOrCreate(deviceKey));
+
+    internal bool RecordConfigurationWrite(
+        string deviceKey, string configurationKey, DateTime observedAtUtc)
+    {
+        Profile profile = GetOrCreate(deviceKey);
+        RebuildConfigurationBindings(profile);
+        if (!profile.CompatibleCommands.TryGetValue(configurationKey, out ConfigurationBinding? binding) ||
+            binding.LastWriteAtUtc == observedAtUtc)
+            return false;
+        binding.LastWriteAtUtc = observedAtUtc;
+        profile.UpdatedAtUtc = observedAtUtc;
+        return true;
+    }
 
     internal bool TryGetCurrentCapability(
         string deviceKey, string capability, out bool supported)
