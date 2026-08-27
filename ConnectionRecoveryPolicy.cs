@@ -4,12 +4,13 @@ internal static class ConnectionRecoveryPolicy
 {
     internal static readonly TimeSpan DeviceBlockedCooldown = TimeSpan.FromHours(1);
     internal static readonly TimeSpan ConnectionLimitCooldown = TimeSpan.FromMinutes(10);
-    internal static readonly TimeSpan UnstableObservationWindow = TimeSpan.FromMinutes(5);
-    internal static readonly TimeSpan UnstableModeDuration = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan UnstableObservationWindow = TimeSpan.FromHours(1);
+    internal static readonly TimeSpan UnstableResetGap = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan UnstableModeDuration = TimeSpan.FromHours(1);
     internal static readonly TimeSpan NormalPassiveGrace = TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan UnstablePassiveGrace = TimeSpan.FromSeconds(15);
     internal static readonly TimeSpan PreviewSpacing = TimeSpan.FromSeconds(3);
-    internal static readonly TimeSpan UnstableDeviceLoginMinimum = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan UnstableDeviceLoginMinimum = TimeSpan.FromMinutes(1);
 
     internal static TimeSpan ErrorCooldown(int error, int consecutiveFailures)
     {
@@ -18,11 +19,13 @@ internal static class ConnectionRecoveryPolicy
         if (error == -25)
             return ConnectionLimitCooldown;
 
-        int exponent = Math.Min(4, Math.Max(0, consecutiveFailures - 1));
-        int minutes = Math.Min(15, 1 << exponent);
         if (error == -8)
-            minutes = Math.Max(minutes, 10);
-        return TimeSpan.FromMinutes(minutes);
+            return TimeSpan.FromMinutes(10);
+
+        // -7/-4 são falhas transitórias comuns durante a retomada P2P. Uma
+        // única tentativa por dispositivo a cada minuto mantém a recuperação
+        // ativa sem produzir rajadas no SDK.
+        return TimeSpan.FromMinutes(1);
     }
 
     internal static TimeSpan PassiveGrace(bool unstable) =>
@@ -37,5 +40,8 @@ internal static class ConnectionRecoveryPolicy
         unstable
             ? UnstableDeviceLoginMinimum
             : TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
+
+    internal static TimeSpan ChannelRetryDelay(int configuredSeconds) =>
+        TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
 
 }

@@ -36,18 +36,21 @@ Require(ConnectionRecoveryPolicy.ErrorCooldown(-25, 1) == TimeSpan.FromMinutes(1
     "O limite -25 não recebeu a pausa de dez minutos.");
 Require(ConnectionRecoveryPolicy.ErrorCooldown(-8, 1) == TimeSpan.FromMinutes(10),
     "O erro -8 não preservou o mínimo de dez minutos.");
-Require(ConnectionRecoveryPolicy.ErrorCooldown(-7, 3) == TimeSpan.FromMinutes(4),
-    "O recuo exponencial comum foi alterado.");
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-7, 3) == TimeSpan.FromMinutes(1),
+    "A falha transitória passou a deixar a câmera sem tentativa por vários minutos.");
 Require(ConnectionRecoveryPolicy.PassiveGrace(unstable: true) == TimeSpan.FromSeconds(15),
     "O modo instável não recebeu a janela passiva ampliada.");
 Require(ConnectionRecoveryPolicy.PassiveCycleMinimum(true, 60) == TimeSpan.FromMinutes(5),
     "O modo instável não limitou os ciclos passivos.");
-Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(true, 60) == TimeSpan.FromMinutes(5),
-    "O modo instável não limitou o login único do dispositivo.");
+Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(true, 60) == TimeSpan.FromMinutes(1),
+    "O modo instável deixou o dispositivo sem tentativa por mais de um minuto.");
 Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromMinutes(1),
     "O login normal não preservou o intervalo mínimo de um minuto.");
 Require(ConnectionRecoveryPolicy.PreviewSpacing == TimeSpan.FromSeconds(3),
     "A restauração sequencial dos canais perdeu o espaçamento de proteção.");
+Require(ConnectionRecoveryPolicy.ChannelRetryDelay(15) == TimeSpan.FromMinutes(1) &&
+        ConnectionRecoveryPolicy.ChannelRetryDelay(300) == TimeSpan.FromMinutes(5),
+    "A repetição protegida do canal perdeu o intervalo configurado.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
 Require(new AppPreferences().AutoReconnect,

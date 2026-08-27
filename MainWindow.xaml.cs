@@ -4443,13 +4443,19 @@ public partial class MainWindow : Window
             if (state.LastDisconnectUtc != default &&
                 now - state.LastDisconnectUtc < TimeSpan.FromSeconds(15))
                 return state.UnstableUntilUtc > now;
+            if (state.LastDisconnectUtc != default &&
+                now - state.LastDisconnectUtc > ConnectionRecoveryPolicy.UnstableResetGap)
+            {
+                state.DisconnectsUtc.Clear();
+                state.UnstableUntilUtc = default;
+            }
             state.LastDisconnectUtc = now;
             while (state.DisconnectsUtc.Count > 0 &&
                    now - state.DisconnectsUtc.Peek() >
                    ConnectionRecoveryPolicy.UnstableObservationWindow)
                 state.DisconnectsUtc.Dequeue();
             state.DisconnectsUtc.Enqueue(now);
-            if (state.DisconnectsUtc.Count >= 2)
+            if (state.DisconnectsUtc.Count >= 6)
                 state.UnstableUntilUtc = now + ConnectionRecoveryPolicy.UnstableModeDuration;
             return state.UnstableUntilUtc > now;
         }
@@ -4627,26 +4633,6 @@ public partial class MainWindow : Window
         try
         {
             bool unstable = IsDeviceInUnstableMode(recoveredDeviceId);
-            if (!TryReservePassiveRecoveryCycle(
-                    recoveredDeviceId, unstable, out TimeSpan cycleWait))
-            {
-                Log($"Retomada passiva aguardando o intervalo do dispositivo {recoveredDeviceId}; " +
-                    $"restante {Math.Ceiling(cycleWait.TotalSeconds)}s; nenhuma requisicao enviada agora.");
-                await Task.Delay(cycleWait);
-                if (isClosing || disconnectedPreviewDevices.ContainsKey(recoveredDeviceId) ||
-                    !automaticDeviceLoginResults.TryGetValue(
-                        recoveredDeviceId, out int delayedLoginState) || delayedLoginState <= 0)
-                    return;
-                unstable = IsDeviceInUnstableMode(recoveredDeviceId);
-                if (!TryReservePassiveRecoveryCycle(
-                        recoveredDeviceId, unstable, out TimeSpan secondWait))
-                {
-                    Log($"Retomada passiva ainda protegida: dispositivo {recoveredDeviceId}; " +
-                        $"restante {Math.Ceiling(secondWait.TotalSeconds)}s; ciclo encerrado sem pedidos.");
-                    return;
-                }
-            }
-
             TimeSpan grace = ConnectionRecoveryPolicy.PassiveGrace(unstable);
             Log($"Sessao P2P retornou passivamente: dispositivo {recoveredDeviceId}; " +
                 $"modo {(unstable ? "instavel" : "normal")}; aguardando {grace.TotalSeconds:0}s " +
@@ -4723,6 +4709,14 @@ public partial class MainWindow : Window
             }
             Log($"Retomada passiva concluida: dispositivo {recoveredDeviceId}; " +
                 $"ausentes {missing.Length}; tentados {attempted}; recuperados {recovered}.");
+
+            foreach (PreviewBinding binding in missing)
+            {
+                if (!confirmedPreviewWindows.ContainsKey(binding.Window) &&
+                    previewBindings.TryGetValue(binding.Window, out PreviewBinding? current) &&
+                    current == binding)
+                    SchedulePreviewRecovery(binding, "retomada do dispositivo não entregou imagem");
+            }
         }
         finally
         {
@@ -4819,47 +4813,65 @@ public partial class MainWindow : Window
 
             SetPreviewStatus(binding, "Aguardando retomada do SDK", System.Drawing.Color.Orange);
             await WaitForRecoveryWindowAsync(binding, TimeSpan.FromSeconds(8));
-            if (!IsPreviewRecoveryRequired(binding))
-                return;
 
-            if (deviceDisconnectEpochs.GetValueOrDefault(binding.DeviceId) != scheduledDisconnectEpoch)
+            while (IsPreviewRecoveryRequired(binding))
             {
-                SetPreviewStatus(binding, "Aguardando sinal P2P", System.Drawing.Color.Orange);
-                Log($"Recuperacao de canal transferida ao monitor do dispositivo {binding.DeviceId}; " +
-                    $"canal {binding.Channel}; nenhuma requisicao enviada.");
-                return;
-            }
-
-            if (disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
-            {
-                SetPreviewStatus(binding, "Aguardando sinal P2P", System.Drawing.Color.Orange);
-                Log($"Recuperacao unica suspensa: dispositivo {binding.DeviceId} offline; " +
-                    $"canal {binding.Channel}; nenhuma requisicao enviada.");
-                return;
-            }
-            if (!CanIssueDeviceRequest(
-                    binding.DeviceId, out TimeSpan protectedWait,
-                    out _, out int protectedError))
-            {
-                SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.IndianRed);
-                Log($"Recuperacao unica suprimida pela protecao: dispositivo {binding.DeviceId}; " +
-                    $"canal {binding.Channel}; erro {protectedError}; " +
-                    $"restante {Math.Ceiling(protectedWait.TotalSeconds)}s; nenhuma requisicao enviada.");
-                return;
-            }
-
-            await deviceGate.WaitAsync();
-            try
-            {
-                if (!IsPreviewRecoveryRequired(binding) ||
-                    disconnectedPreviewDevices.ContainsKey(binding.DeviceId) ||
-                    deviceDisconnectEpochs.GetValueOrDefault(binding.DeviceId) != scheduledDisconnectEpoch)
+                if (deviceDisconnectEpochs.GetValueOrDefault(binding.DeviceId) != scheduledDisconnectEpoch ||
+                    disconnectedPreviewDevices.ContainsKey(binding.DeviceId))
+                {
+                    SetPreviewStatus(binding, "Aguardando sinal P2P", System.Drawing.Color.Orange);
+                    Log($"Recuperacao de canal transferida ao monitor do dispositivo {binding.DeviceId}; " +
+                        $"canal {binding.Channel}; nenhuma requisicao enviada.");
                     return;
-                await RecoverPreviewAsync(binding, forceOneAttempt: true);
-            }
-            finally
-            {
-                deviceGate.Release();
+                }
+
+                if (!CanIssueDeviceRequest(
+                        binding.DeviceId, out TimeSpan protectedWait,
+                        out _, out int protectedError))
+                {
+                    SetPreviewStatus(binding, DeviceBlockStatus(binding.DeviceId), System.Drawing.Color.Orange);
+                    Log($"Recuperacao de canal aguardando protecao: dispositivo {binding.DeviceId}; " +
+                        $"canal {binding.Channel}; erro {protectedError}; " +
+                        $"restante {Math.Ceiling(protectedWait.TotalSeconds)}s; nenhuma requisicao enviada.");
+                    await WaitForRecoveryWindowAsync(binding, protectedWait);
+                    continue;
+                }
+
+                await deviceGate.WaitAsync();
+                try
+                {
+                    if (!IsPreviewRecoveryRequired(binding) ||
+                        disconnectedPreviewDevices.ContainsKey(binding.DeviceId) ||
+                        deviceDisconnectEpochs.GetValueOrDefault(binding.DeviceId) != scheduledDisconnectEpoch)
+                        return;
+
+                    // Libera o player anterior antes da nova abertura. Assim a
+                    // recuperação pode continuar sem acumular sessões nativas.
+                    try { CmsSdk.CMS_Client_StopPreviewByWnd(binding.Window, 0); }
+                    catch { }
+                    activePreviewWindows.Remove(binding.Window);
+                    confirmedPreviewWindows.TryRemove(binding.Window, out _);
+                    failedPreviewWindows.TryRemove(binding.Window, out _);
+                    await Task.Delay(500);
+                    await RecoverPreviewAsync(binding, forceOneAttempt: true);
+                }
+                finally
+                {
+                    deviceGate.Release();
+                }
+
+                if (!IsPreviewRecoveryRequired(binding))
+                    return;
+
+                TimeSpan retryDelay = ConnectionRecoveryPolicy.ChannelRetryDelay(
+                    preferences.ReconnectDelaySeconds);
+                SetPreviewStatus(
+                    binding,
+                    $"Nova tentativa em {Math.Ceiling(retryDelay.TotalSeconds)}s",
+                    System.Drawing.Color.Orange);
+                Log($"Canal ainda sem imagem: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
+                    $"nova tentativa protegida em {Math.Ceiling(retryDelay.TotalSeconds)}s.");
+                await WaitForRecoveryWindowAsync(binding, retryDelay);
             }
         }
         catch (Exception ex)
@@ -4876,7 +4888,7 @@ public partial class MainWindow : Window
             else if (IsPreviewRecoveryRequired(binding) &&
                      !disconnectedPreviewDevices.ContainsKey(binding.DeviceId) &&
                      deviceDisconnectEpochs.GetValueOrDefault(binding.DeviceId) == scheduledDisconnectEpoch)
-                SetPreviewStatus(binding, "Offline - aguardando evento", System.Drawing.Color.IndianRed);
+                SetPreviewStatus(binding, "Aguardando nova tentativa", System.Drawing.Color.Orange);
         }
     }
 
