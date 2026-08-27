@@ -80,3 +80,16 @@ Fluxo obrigatório:
 9. se não houver resposta, nenhuma repetição ou restauração incerta é enviada.
 
 Há intervalo mínimo persistente de dois minutos entre alterações. Rede, firmware, formatação, alarmes e plano de gravação remoto permanecem bloqueados nesta versão.
+
+## Interface de configurações da versão 0.15.1
+
+O botão **Configurações da câmera** abre uma interface voltada ao cliente, não a tabela técnica:
+
+- menu lateral com categorias;
+- cartões no mesmo tema visual do monitor;
+- textos simples, sem nomes de protocolo, evidências ou códigos internos;
+- botões somente para ações realmente implementadas;
+- categorias incompatíveis são ocultadas;
+- recursos compatíveis ainda protegidos são identificados claramente, sem controles falsos.
+
+A tabela de compatibilidade continua separada como ferramenta de diagnóstico e não é usada para configurar a câmera.

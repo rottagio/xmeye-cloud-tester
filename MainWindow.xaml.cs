@@ -5869,6 +5869,414 @@ public partial class MainWindow : Window
                 "Configurações da câmera", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        ShowFriendlyDeviceSettings(device);
+    }
+
+    private void ShowFriendlyDeviceSettings(CloudApi.AccountDevice device)
+    {
+        RefreshDeviceProfilesFromKnownData();
+        deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
+        var dialog = new Window
+        {
+            Owner = this,
+            Title = $"Configurações — {device.Alias}",
+            Width = 1080,
+            Height = 720,
+            MinWidth = 860,
+            MinHeight = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(8, 20, 33))
+        };
+        var root = new Grid();
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var header = new StackPanel { Margin = new Thickness(26, 22, 26, 16) };
+        header.Children.Add(new TextBlock
+        {
+            Text = device.Alias,
+            Foreground = System.Windows.Media.Brushes.White,
+            FontSize = 26,
+            FontWeight = FontWeights.SemiBold
+        });
+        header.Children.Add(new TextBlock
+        {
+            Text = "Configurações individuais desta câmera",
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            FontSize = 14,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        root.Children.Add(header);
+
+        var status = new TextBlock
+        {
+            Text = "Selecione uma categoria.",
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            Margin = new Thickness(26, 12, 26, 18),
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetRow(status, 2);
+        root.Children.Add(status);
+
+        var tabs = new System.Windows.Controls.TabControl
+        {
+            TabStripPlacement = Dock.Left,
+            Margin = new Thickness(18, 0, 18, 0),
+            Background = System.Windows.Media.Brushes.Transparent,
+            BorderThickness = new Thickness(0)
+        };
+        Grid.SetRow(tabs, 1);
+        root.Children.Add(tabs);
+        dialog.Content = root;
+
+        bool Confirmed(string configurationKey) =>
+            profile?.CompatibleCommands.TryGetValue(
+                configurationKey, out DeviceProfileStore.ConfigurationBinding? binding) == true &&
+            binding.Supported == true;
+
+        PreviewBinding? OnlineBinding() => previewBindings.Values.FirstOrDefault(candidate =>
+            string.Equals(candidate.CloudId, device.CloudId, StringComparison.Ordinal) &&
+            confirmedPreviewWindows.ContainsKey(candidate.Window));
+
+        static TextBlock PageTitle(string text) => new()
+        {
+            Text = text,
+            Foreground = System.Windows.Media.Brushes.White,
+            FontSize = 23,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 14)
+        };
+
+        static System.Windows.Controls.Button ActionButton(string text) => new()
+        {
+            Content = text,
+            Padding = new Thickness(14, 8, 14, 8),
+            MinWidth = 130,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        static Border Card(string title, string description, string state,
+            UIElement? action = null, bool available = true)
+        {
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            if (action is not null)
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var text = new StackPanel();
+            text.Children.Add(new TextBlock
+            {
+                Text = title,
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 16,
+                FontWeight = FontWeights.SemiBold
+            });
+            text.Children.Add(new TextBlock
+            {
+                Text = description,
+                Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(142, 162, 188)),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 5, 16, 0)
+            });
+            text.Children.Add(new TextBlock
+            {
+                Text = state,
+                Foreground = new System.Windows.Media.SolidColorBrush(available
+                    ? System.Windows.Media.Color.FromRgb(75, 222, 128)
+                    : System.Windows.Media.Color.FromRgb(142, 162, 188)),
+                Margin = new Thickness(0, 8, 0, 0)
+            });
+            grid.Children.Add(text);
+            if (action is not null)
+            {
+                Grid.SetColumn(action, 1);
+                grid.Children.Add(action);
+            }
+            return new Border
+            {
+                Background = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(14, 31, 49)),
+                BorderBrush = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(38, 58, 80)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(18),
+                Margin = new Thickness(0, 0, 0, 12),
+                Child = grid
+            };
+        }
+
+        static StackPanel Page(string title)
+        {
+            var panel = new StackPanel { Margin = new Thickness(24, 8, 24, 24) };
+            panel.Children.Add(PageTitle(title));
+            return panel;
+        }
+
+        static TabItem Category(string title, StackPanel page) => new()
+        {
+            Header = title,
+            Padding = new Thickness(18, 12, 18, 12),
+            MinWidth = 205,
+            Content = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = page
+            }
+        };
+
+        void RebuildPages(int selectedIndex = -1)
+        {
+            if (selectedIndex < 0)
+                selectedIndex = tabs.SelectedIndex;
+            tabs.Items.Clear();
+            CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+            int? channels = profile?.ConfirmedChannelCount ?? entry.DetectedChannelCount;
+
+            StackPanel basics = Page("Básicas");
+            basics.Children.Add(Card("Nome", "Nome usado neste computador.", device.Alias));
+            basics.Children.Add(Card("Canais", "Quantidade de imagens confirmadas para este dispositivo.",
+                channels is int count ? $"{count} canal(is)" : "Será identificado durante o uso",
+                available: channels is not null));
+            tabs.Items.Add(Category("Básicas", basics));
+
+            DeviceReadOnlyConfigStore.DeviceData local = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
+            StackPanel storage = Page("Armazenamento");
+            var storageButton = ActionButton(local.Storage is null ? "Consultar" : "Atualizado");
+            storageButton.IsEnabled = local.Storage is null;
+            string storageState = local.Storage is null
+                ? "Ainda não consultado"
+                : local.Storage.Partitions.Count == 0
+                    ? $"{local.Storage.DiskCount} unidade(s) informada(s)"
+                    : $"{local.Storage.Partitions.Sum(item => item.TotalMegabytes) / 1024d:F1} GB — " +
+                      $"{local.Storage.Partitions.Sum(item => item.FreeMegabytes) / 1024d:F1} GB livres";
+            storage.Children.Add(Card("Cartão e capacidade",
+                "Consulte o espaço informado pela câmera sem alterar o cartão.",
+                storageState, storageButton, local.Storage is not null));
+            storageButton.Click += async (_, _) =>
+            {
+                PreviewBinding? online = OnlineBinding();
+                if (online is null)
+                {
+                    status.Text = "A câmera precisa estar com imagem online para consultar o armazenamento.";
+                    return;
+                }
+                storageButton.IsEnabled = false;
+                status.Text = "Consultando armazenamento uma única vez...";
+                DeviceReadOnlyConfigStore.StorageInfo? result = await ReadStorageOnDemandAsync(device, online);
+                status.Text = result is null
+                    ? "A câmera não retornou dados válidos. A consulta não será repetida automaticamente."
+                    : "Armazenamento atualizado.";
+                RebuildPages(tabs.SelectedIndex);
+            };
+            tabs.Items.Add(Category("Armazenamento", storage));
+
+            StackPanel recording = Page("Gravação");
+            PreviewBinding? currentOnline = OnlineBinding();
+            DeviceReadOnlyConfigStore.RecordingInfo? recordingInfo = currentOnline is not null &&
+                local.RecordingByChannel.TryGetValue(currentOnline.Channel, out DeviceReadOnlyConfigStore.RecordingInfo? rec)
+                ? rec
+                : local.RecordingByChannel.Values.FirstOrDefault();
+            var recordingButton = ActionButton(recordingInfo is null ? "Consultar" : "Atualizado");
+            recordingButton.IsEnabled = recordingInfo is null;
+            string recordingState = recordingInfo is null
+                ? "Ainda não consultado"
+                : $"Modo {recordingInfo.RecordModeCode} — arquivos de {recordingInfo.PacketLengthMinutes} min";
+            recording.Children.Add(Card("Gravação no dispositivo",
+                "Veja o plano de gravação informado pela câmera. Alterações permanecem protegidas.",
+                recordingState, recordingButton, recordingInfo is not null));
+            recordingButton.Click += async (_, _) =>
+            {
+                PreviewBinding? online = OnlineBinding();
+                if (online is null)
+                {
+                    status.Text = "A câmera precisa estar com imagem online para consultar a gravação.";
+                    return;
+                }
+                recordingButton.IsEnabled = false;
+                status.Text = "Consultando configuração de gravação uma única vez...";
+                DeviceReadOnlyConfigStore.RecordingInfo? result = await ReadRecordingOnDemandAsync(device, online);
+                status.Text = result is null
+                    ? "A câmera não retornou dados válidos. A consulta não será repetida automaticamente."
+                    : "Configuração de gravação atualizada.";
+                RebuildPages(tabs.SelectedIndex);
+            };
+            tabs.Items.Add(Category("Gravação", recording));
+
+            void AddFeaturePage(string category, params (string Key, string Title, string Description)[] features)
+            {
+                var supported = features.Where(feature => Confirmed(feature.Key)).ToArray();
+                if (supported.Length == 0)
+                    return;
+                StackPanel page = Page(category);
+                foreach (var feature in supported)
+                    page.Children.Add(Card(feature.Title, feature.Description,
+                        "Disponível nesta câmera — configuração detalhada ainda protegida"));
+                tabs.Items.Add(Category(category, page));
+            }
+
+            AddFeaturePage("Alarme inteligente",
+                ("Alarm.Motion", "Detecção de movimento", "Detecção de atividade na imagem."),
+                ("Alarm.Human", "Detecção de pessoa", "Reconhecimento de presença humana."),
+                ("Alarm.Pir", "Sensor PIR", "Sensor físico de presença, quando disponível."),
+                ("Tracking.Motion", "Rastreamento", "Acompanhamento automático de movimento."));
+
+            if (Confirmed("Light.White") || Confirmed("Alarm.VoiceType") || Confirmed("Audio.SpeakerVolume"))
+            {
+                StackPanel alarm = Page("Alarme sonoro e luminoso");
+                if (Confirmed("Light.White"))
+                {
+                    currentOnline = OnlineBinding();
+                    DeviceReadOnlyConfigStore.LightInfo? light = currentOnline is not null &&
+                        local.LightByChannel.TryGetValue(currentOnline.Channel, out DeviceReadOnlyConfigStore.LightInfo? value)
+                        ? value
+                        : null;
+                    var lightAction = ActionButton(light is null ? "Carregar" : "Alterar nível");
+                    lightAction.Click += async (_, _) =>
+                    {
+                        PreviewBinding? online = OnlineBinding();
+                        if (online is null)
+                        {
+                            status.Text = "A câmera precisa estar com imagem online.";
+                            return;
+                        }
+                        if (!readOnlyDeviceConfigs.GetOrCreate(device.CloudId).LightByChannel.TryGetValue(
+                                online.Channel, out DeviceReadOnlyConfigStore.LightInfo? loaded))
+                        {
+                            lightAction.IsEnabled = false;
+                            status.Text = "Carregando iluminação uma única vez...";
+                            loaded = await ReadCameraLightOnDemandAsync(device, online);
+                            status.Text = loaded is null
+                                ? "A câmera não retornou uma configuração de iluminação válida."
+                                : "Iluminação carregada.";
+                            RebuildPages(tabs.SelectedIndex);
+                            return;
+                        }
+                        ConfigurationWriteResult result = await PromptAndSetLightLevelAsync(
+                            dialog, device, online, loaded);
+                        status.Text = result.Message;
+                        RebuildPages(tabs.SelectedIndex);
+                    };
+                    alarm.Children.Add(Card("Luz branca", "Ajuste a intensidade da luz desta câmera.",
+                        light is null ? "Carregue o valor atual antes de alterar" : $"Nível atual: {light.Level}",
+                        lightAction, light is not null));
+                }
+                if (Confirmed("Alarm.VoiceType"))
+                    alarm.Children.Add(Card("Aviso sonoro", "Som emitido pela câmera durante um alerta.",
+                        "Disponível — alteração ainda protegida"));
+                tabs.Items.Add(Category("Som e luz", alarm));
+            }
+
+            AddFeaturePage("Áudio",
+                ("Audio.SpeakerVolume", "Volume do alto-falante", "Volume de reprodução e avisos."),
+                ("Audio.MicrophoneVolume", "Volume do microfone", "Nível de captura de áudio."));
+            AddFeaturePage("Rede",
+                ("Network.Wifi", "Wi‑Fi", "Rede sem fio utilizada pelo dispositivo."),
+                ("Network.Ntp", "Data e hora", "Sincronização automática de horário."),
+                ("Network.Rtsp", "RTSP", "Transmissão direta compatível com o dispositivo."));
+            AddFeaturePage("Avançadas",
+                ("Ptz.Configuration", "PTZ", "Orientação e movimento da câmera."),
+                ("Ptz.Presets", "Posições favoritas", "Posições PTZ salvas no dispositivo."),
+                ("Camera.Parameters", "Imagem", "Parâmetros de vídeo da câmera."));
+
+            StackPanel about = Page("Sobre");
+            about.Children.Add(Card("Modelo", "Modelo informado pelo dispositivo ou provedor.",
+                string.IsNullOrWhiteSpace(profile?.ReportedModel) ? "Não informado" : profile.ReportedModel,
+                available: !string.IsNullOrWhiteSpace(profile?.ReportedModel)));
+            about.Children.Add(Card("Firmware", "Versão instalada na câmera.",
+                string.IsNullOrWhiteSpace(profile?.Firmware) ? "Não informado" : profile.Firmware,
+                available: !string.IsNullOrWhiteSpace(profile?.Firmware)));
+            tabs.Items.Add(Category("Sobre", about));
+
+            tabs.SelectedIndex = Math.Clamp(selectedIndex, 0, tabs.Items.Count - 1);
+        }
+
+        RebuildPages(0);
+        dialog.ShowDialog();
+    }
+
+    private async Task<ConfigurationWriteResult> PromptAndSetLightLevelAsync(
+        Window owner, CloudApi.AccountDevice device, PreviewBinding online,
+        DeviceReadOnlyConfigStore.LightInfo currentLight)
+    {
+        var prompt = new Window
+        {
+            Owner = owner,
+            Title = "Nível da luz branca",
+            Width = 430,
+            Height = 245,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(8, 20, 33))
+        };
+        var panel = new StackPanel { Margin = new Thickness(22) };
+        var valueText = new TextBlock
+        {
+            Text = $"Nível: {currentLight.Level}",
+            Foreground = System.Windows.Media.Brushes.White,
+            FontSize = 18,
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        var slider = new System.Windows.Controls.Slider
+        {
+            Minimum = 0, Maximum = 100, Value = currentLight.Level,
+            TickFrequency = 5, IsSnapToTickEnabled = true
+        };
+        slider.ValueChanged += (_, _) => valueText.Text = $"Nível: {(int)slider.Value}";
+        panel.Children.Add(valueText);
+        panel.Children.Add(slider);
+        panel.Children.Add(new TextBlock
+        {
+            Text = "A alteração será enviada uma vez e confirmada pela própria câmera.",
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(142, 162, 188)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 12, 0, 12)
+        });
+        var buttons = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+        };
+        buttons.Children.Add(new System.Windows.Controls.Button
+        {
+            Content = "Cancelar", IsCancel = true, Padding = new Thickness(15, 7, 15, 7)
+        });
+        var apply = new System.Windows.Controls.Button
+        {
+            Content = "Aplicar", IsDefault = true, Padding = new Thickness(15, 7, 15, 7),
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        apply.Click += (_, _) => prompt.DialogResult = true;
+        buttons.Children.Add(apply);
+        panel.Children.Add(buttons);
+        prompt.Content = panel;
+        if (prompt.ShowDialog() != true)
+            return new(false, false, "Alteração cancelada.");
+        int requested = (int)slider.Value;
+        if (requested == currentLight.Level)
+            return new(true, false, "O nível não foi alterado.");
+        if (System.Windows.MessageBox.Show(owner,
+                $"Alterar a luz de {currentLight.Level} para {requested}?",
+                "Confirmar alteração", MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return new(false, false, "Alteração cancelada.");
+        return await SetCameraLightLevelControlledAsync(device, online, requested);
+    }
+
+    private void ShowSelectedDeviceSettingsLegacy(object sender, RoutedEventArgs e)
+    {
+        if (DeviceBox.SelectedItem is not CloudApi.AccountDevice device)
+        {
+            System.Windows.MessageBox.Show(this, "Selecione uma câmera.",
+                "Configurações da câmera", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
 
         RefreshDeviceProfilesFromKnownData();
         deviceProfiles.Devices.TryGetValue(device.CloudId, out DeviceProfileStore.Profile? profile);
