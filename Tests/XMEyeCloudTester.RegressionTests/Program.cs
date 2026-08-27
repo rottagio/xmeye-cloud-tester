@@ -123,6 +123,18 @@ Require(DeviceConfigurationReadPolicy.CanReadOnDemand(whiteLight, true, out _),
     "Uma leitura explicitamente suportada foi recusada.");
 Console.WriteLine("DEVICE_CONFIGURATION_READ_POLICY_OK");
 
+Require(DeviceSettingsPresentationPolicy.ShowConfirmed(human),
+    "Um recurso confirmado não apareceu na configuração individual.");
+Require(!DeviceSettingsPresentationPolicy.ShowConfirmed(wifi),
+    "Um recurso incompatível apareceu como utilizável.");
+Require(!DeviceSettingsPresentationPolicy.ShowConfirmed(null),
+    "Um recurso ainda desconhecido apareceu como utilizável.");
+Require(DeviceSettingsPresentationPolicy.OfferSafeProbe("Storage.Info") &&
+        DeviceSettingsPresentationPolicy.OfferSafeProbe("Recording.Main") &&
+        !DeviceSettingsPresentationPolicy.OfferSafeProbe("Network.Wifi"),
+    "A tela ofereceu uma sondagem fora da lista segura.");
+Console.WriteLine("DEVICE_SETTINGS_PRESENTATION_POLICY_OK");
+
 static void Require(bool condition, string message)
 {
     if (!condition)

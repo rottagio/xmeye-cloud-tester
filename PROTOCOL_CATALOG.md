@@ -51,3 +51,14 @@ O nome JSON diferencia a operação dentro de `1042/1040`. Os nomes e metadados 
 - Se `SystemFunction` negar explicitamente uma capacidade, sua leitura detalhada também é recusada.
 - Respostas válidas são gravadas como evidência no perfil individual; timeouts e respostas inválidas não viram “incompatível”.
 - O cache local existente é reaproveitado no início, sem consultar novamente a câmera.
+
+## Apresentação por câmera
+
+A tela **Configurações da câmera** é montada a partir do perfil do dispositivo selecionado:
+
+- separa os itens por seção e permite filtrar uma seção;
+- mostra como disponível somente o que foi confirmado para aquela câmera e firmware;
+- omite recursos incompatíveis ou ainda desconhecidos dos controles utilizáveis;
+- mantém visíveis apenas as sondagens seguras de armazenamento e gravação;
+- informa a quantidade de recursos confirmados, incompatíveis e ainda não identificados;
+- identifica recursos de leitura/gravação, mas mantém toda alteração remota desabilitada nesta etapa.

@@ -4258,6 +4258,8 @@ public partial class MainWindow : Window
                     cloudId, capability.Key, supported, "SystemFunction: " + matched);
         changed |= deviceProfiles.RecordCapability(
             cloudId, "Identification.SystemFunctionSchema3", true, "SystemFunction");
+        changed |= deviceProfiles.RecordConfigurationEvidence(
+            cloudId, "Capability.SystemFunction", true, "SystemFunction: resposta válida");
         if (changed)
             SaveDeviceProfiles();
     }
@@ -5718,17 +5720,6 @@ public partial class MainWindow : Window
             Source = source,
             Observed = ObservedText(observedAtUtc)
         };
-        DeviceSettingRow CapabilityRow(DeviceCapabilityCatalog.Definition definition)
-        {
-            DeviceProfileStore.CapabilitySnapshot snapshot = CapabilitySnapshot(definition.Key);
-            string support = CapabilityText(snapshot);
-            return Row(definition.Section, definition.Label, support,
-                snapshot.State == DeviceProfileStore.CapabilityState.Unknown
-                    ? "Ainda não informado pela câmera"
-                    : "Compatibilidade confirmada; detalhes não foram consultados",
-                FriendlySource(snapshot.Source), snapshot.ObservedAtUtc);
-        }
-
         DeviceProfileStore.CapabilitySnapshot doubleLightSnapshot =
             CapabilitySnapshot("SupportDoubleLightCamera");
         string doubleLight = CapabilityText(doubleLightSnapshot);
@@ -5790,37 +5781,80 @@ public partial class MainWindow : Window
                     ? "Informado" : "Não informado pelo provedor", "Dado recebido durante o cadastro",
                     "Conta/CMS", profile?.UpdatedAtUtc),
             };
-            foreach (DeviceCapabilityCatalog.Definition definition in DeviceCapabilityCatalog.Definitions)
+            rows.Add(Row("Rede", "Transporte da câmera", "Cloud P2P",
+                "Senhas e chaves de rede não são consultadas", "Cadastro local"));
+
+            Dictionary<string, DeviceProfileStore.ConfigurationBinding> bindings =
+                profile?.CompatibleCommands ?? new(StringComparer.Ordinal);
+            foreach (DeviceConfigurationCatalog.Definition definition in
+                     DeviceConfigurationCatalog.Definitions
+                         .OrderBy(item => item.Section).ThenBy(item => item.Label))
             {
-                if (definition.Key == "SupportDoubleLightCamera")
-                {
-                    rows.Add(Row("Alarmes", "Luz branca / luz dupla",
-                        light is null ? doubleLight : "Dados locais", lightSummary,
-                        light is null ? FriendlySource(doubleLightSnapshot.Source) : "Leitura solicitada e armazenada localmente",
-                        light?.ObservedAtUtc ?? doubleLightSnapshot.ObservedAtUtc));
+                if (!bindings.TryGetValue(definition.Key, out DeviceProfileStore.ConfigurationBinding? binding) ||
+                    !DeviceSettingsPresentationPolicy.ShowConfirmed(binding))
                     continue;
+
+                string dataState = definition.Access == DeviceConfigurationCatalog.AccessMode.ReadOnly
+                    ? "Leitura confirmada"
+                    : "Recurso confirmado; alterações ainda desabilitadas";
+                DateTime? observed = binding.ObservedAtUtc;
+                if (definition.Key == "Storage.Info")
+                {
+                    dataState = storageSummary;
+                    observed = local.Storage?.ObservedAtUtc ?? observed;
                 }
-                rows.Add(CapabilityRow(definition));
+                else if (definition.Key == "Recording.Main")
+                {
+                    dataState = recordingSummary;
+                    observed = recording?.ObservedAtUtc ?? observed;
+                }
+                else if (definition.Key == "Light.White")
+                {
+                    dataState = lightSummary;
+                    observed = light?.ObservedAtUtc ?? observed;
+                }
+                rows.Add(Row(definition.Section, definition.Label, "Disponível",
+                    dataState, FriendlySource(binding.Evidence), observed));
             }
-            rows.AddRange(
-            [
-                Row("Rede", "Transporte da câmera", "Cloud P2P",
-                    "Senhas e chaves de rede não são consultadas", "Cadastro local"),
-                Row("Armazenamento", "Cartão e capacidade",
-                    local.Storage is null ? "Leitura disponível" : "Dados locais", storageSummary,
-                    local.Storage is null ? "Ainda não consultado" : "Leitura solicitada e armazenada localmente",
-                    local.Storage?.ObservedAtUtc),
-                Row("Gravação", "Plano e modo de gravação",
-                    recording is null ? "Leitura disponível" : "Dados locais", recordingSummary,
-                    recording is null ? "Ainda não consultado" : "Leitura solicitada e armazenada localmente",
-                    recording?.ObservedAtUtc)
-            ]);
+
+            // Estas duas sondagens seguras precisam continuar visíveis antes
+            // da confirmação; caso contrário não haveria como solicitá-las.
+            if (DeviceSettingsPresentationPolicy.OfferSafeProbe("Storage.Info") &&
+                (!bindings.TryGetValue("Storage.Info", out DeviceProfileStore.ConfigurationBinding? storageBinding) ||
+                 !DeviceSettingsPresentationPolicy.ShowConfirmed(storageBinding)))
+                rows.Add(Row("Armazenamento", "Discos e cartão SD", "Leitura segura disponível",
+                    storageSummary, "Ainda não consultado"));
+            if (DeviceSettingsPresentationPolicy.OfferSafeProbe("Recording.Main") &&
+                (!bindings.TryGetValue("Recording.Main", out DeviceProfileStore.ConfigurationBinding? recordingBinding) ||
+                 !DeviceSettingsPresentationPolicy.ShowConfirmed(recordingBinding)))
+                rows.Add(Row("Gravação", "Gravação principal", "Leitura segura disponível",
+                    recordingSummary, "Ainda não consultado"));
             return rows.ToArray();
+        }
+
+        DeviceSettingRow[] initialRows = BuildRows();
+        var sectionFilter = new System.Windows.Controls.ComboBox
+        {
+            MinWidth = 220,
+            Margin = new Thickness(0, 0, 0, 10),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
+            ItemsSource = new[] { "Todas as seções" }
+                .Concat(initialRows.Select(item => item.Section).Distinct(StringComparer.Ordinal))
+                .ToArray(),
+            SelectedIndex = 0
+        };
+        DeviceSettingRow[] FilteredRows()
+        {
+            DeviceSettingRow[] rows = BuildRows();
+            string selectedSection = sectionFilter.SelectedItem?.ToString() ?? "Todas as seções";
+            return selectedSection == "Todas as seções"
+                ? rows
+                : rows.Where(item => item.Section == selectedSection).ToArray();
         }
 
         var table = new DataGrid
         {
-            ItemsSource = BuildRows(),
+            ItemsSource = initialRows,
             IsReadOnly = true,
             AutoGenerateColumns = false,
             CanUserAddRows = false,
@@ -5849,6 +5883,8 @@ public partial class MainWindow : Window
         AddSettingColumn(table, "Origem", nameof(DeviceSettingRow.Source), 260);
         AddSettingColumn(table, "Confirmado em", nameof(DeviceSettingRow.Observed), 135);
 
+        sectionFilter.SelectionChanged += (_, _) => table.ItemsSource = FilteredRows();
+
         var layout = new Grid { Margin = new Thickness(20) };
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -5863,14 +5899,32 @@ public partial class MainWindow : Window
         });
         title.Children.Add(new TextBlock
         {
-            Text = "Esta tela usa o inventário local. As leituras detalhadas serão feitas sob demanda, uma seção por vez; abrir esta tela não consulta a câmera.",
+            Text = "São exibidos apenas dados recebidos e recursos confirmados para esta câmera. " +
+                "As leituras detalhadas são feitas sob demanda; abrir esta tela não consulta o dispositivo.",
             Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(142, 162, 188)),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 0)
         });
+        int confirmedConfigurations = profile?.CompatibleCommands.Count(item => item.Value.Supported == true) ?? 0;
+        int unavailableConfigurations = profile?.CompatibleCommands.Count(item => item.Value.Supported == false) ?? 0;
+        int pendingConfigurations = Math.Max(0,
+            DeviceConfigurationCatalog.Definitions.Length - confirmedConfigurations - unavailableConfigurations);
+        title.Children.Add(new TextBlock
+        {
+            Text = $"Perfil individual: {confirmedConfigurations} confirmado(s), " +
+                $"{unavailableConfigurations} incompatível(is), {pendingConfigurations} ainda não identificado(s).",
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(104, 211, 145)),
+            Margin = new Thickness(0, 5, 0, 0)
+        });
         layout.Children.Add(title);
+        var tableArea = new Grid();
+        tableArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        tableArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        tableArea.Children.Add(sectionFilter);
         Grid.SetRow(table, 1);
-        layout.Children.Add(table);
+        tableArea.Children.Add(table);
+        Grid.SetRow(tableArea, 1);
+        layout.Children.Add(tableArea);
 
         var footer = new DockPanel { Margin = new Thickness(0, 14, 0, 0) };
         var status = new TextBlock
@@ -5918,7 +5972,7 @@ public partial class MainWindow : Window
         void RefreshRows()
         {
             table.ItemsSource = null;
-            table.ItemsSource = BuildRows();
+            table.ItemsSource = FilteredRows();
         }
 
         bool PrepareRead()
