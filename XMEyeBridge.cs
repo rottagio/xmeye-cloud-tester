@@ -9,6 +9,7 @@ internal static class XMEyeBridge
     // A lista oficial pode conter muitos dispositivos e compartilhamentos.
     private const int ResponseCapacity = 1048576;
     private static readonly object Sync = new();
+    private static readonly StringBuilder SharedResponse = new(ResponseCapacity);
     private static string qtDiagnosticPath = string.Empty;
 
     [DllImport("XMEyeBridge.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
@@ -140,11 +141,12 @@ internal static class XMEyeBridge
     {
         lock (Sync)
         {
-            var response = new StringBuilder(ResponseCapacity);
-            int result = XMEye_HttpGet(url, requestType, response, response.Capacity);
-            if (result != 1 || response.Length == 0)
+            SharedResponse.Clear();
+            int result = XMEye_HttpGet(
+                url, requestType, SharedResponse, SharedResponse.Capacity);
+            if (result != 1 || SharedResponse.Length == 0)
                 throw new InvalidOperationException($"A consulta oficial do QR falhou ({result}).");
-            return response.ToString();
+            return SharedResponse.ToString();
         }
     }
 
@@ -152,11 +154,12 @@ internal static class XMEyeBridge
     {
         lock (Sync)
         {
-            var response = new StringBuilder(ResponseCapacity);
-            int result = XMEye_HttpPost(url, body, requestType, response, response.Capacity);
-            if (result != 1 || response.Length == 0)
+            SharedResponse.Clear();
+            int result = XMEye_HttpPost(
+                url, body, requestType, SharedResponse, SharedResponse.Capacity);
+            if (result != 1 || SharedResponse.Length == 0)
                 throw new InvalidOperationException($"A consulta oficial do QR falhou ({result}).");
-            return response.ToString();
+            return SharedResponse.ToString();
         }
     }
 
@@ -165,12 +168,13 @@ internal static class XMEyeBridge
     {
         lock (Sync)
         {
-            var response = new StringBuilder(ResponseCapacity);
+            SharedResponse.Clear();
             int result = XMEye_HttpPostAuthorized(
-                url, body, authorization, requestType, response, response.Capacity);
-            if (result != 1 || response.Length == 0)
+                url, body, authorization, requestType,
+                SharedResponse, SharedResponse.Capacity);
+            if (result != 1 || SharedResponse.Length == 0)
                 throw new InvalidOperationException($"A consulta autenticada do QR falhou ({result}).");
-            return response.ToString();
+            return SharedResponse.ToString();
         }
     }
 }

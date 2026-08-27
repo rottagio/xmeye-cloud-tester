@@ -48,6 +48,12 @@ Require(ConnectionRecoveryPolicy.DeviceLoginMinimum(false, 30) == TimeSpan.FromM
     "O login normal não preservou o intervalo mínimo de um minuto.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
+Require(QtRuntime.IntervalFor(QtPumpState.Active) == TimeSpan.FromMilliseconds(25) &&
+        QtRuntime.IntervalFor(QtPumpState.VisibleIdle) == TimeSpan.FromMilliseconds(100) &&
+        QtRuntime.IntervalFor(QtPumpState.MinimizedIdle) == TimeSpan.FromMilliseconds(250),
+    "O bombeamento adaptativo do Qt perdeu os intervalos definidos.");
+Console.WriteLine("QT_EVENT_PUMP_POLICY_OK");
+
 var profiles = new DeviceProfileStore();
 profiles.RecordCapability("camera-a", "SupportWifi", false, "SystemFunction: SupportWifi");
 profiles.RecordCapability("camera-a", "SupportPTZDirectionControl", true,

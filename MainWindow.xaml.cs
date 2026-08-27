@@ -87,123 +87,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private sealed class PtzChevronControl : Forms.Control
-    {
-        private readonly int direction;
-        private readonly Forms.Timer fadeTimer = new() { Interval = 15 };
-        private float currentOpacity = 0.18F;
-        private float targetOpacity = 0.18F;
-
-        internal PtzChevronControl(int direction)
-        {
-            this.direction = direction;
-            SetStyle(
-                Forms.ControlStyles.UserPaint |
-                Forms.ControlStyles.AllPaintingInWmPaint |
-                Forms.ControlStyles.OptimizedDoubleBuffer |
-                Forms.ControlStyles.SupportsTransparentBackColor,
-                true);
-            BackColor = System.Drawing.Color.Transparent;
-            Cursor = Forms.Cursors.Hand;
-            TabStop = false;
-            Size = new System.Drawing.Size(32, 32);
-            fadeTimer.Tick += (_, _) => AnimateOpacity();
-            RebuildRegion();
-        }
-
-        private System.Drawing.PointF[] ChevronPoints(float inset)
-        {
-            float left = inset;
-            float top = inset;
-            float right = Math.Max(left, ClientSize.Width - inset - 1);
-            float bottom = Math.Max(top, ClientSize.Height - inset - 1);
-            float centerX = ClientSize.Width / 2F;
-            float centerY = ClientSize.Height / 2F;
-            return direction switch
-            {
-                0 => [new(left, bottom), new(centerX, top), new(right, bottom)],
-                1 => [new(left, top), new(centerX, bottom), new(right, top)],
-                2 => [new(right, top), new(left, centerY), new(right, bottom)],
-                _ => [new(left, top), new(right, centerY), new(left, bottom)]
-            };
-        }
-
-        private void RebuildRegion()
-        {
-            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
-                return;
-            using var path = new System.Drawing.Drawing2D.GraphicsPath();
-            path.AddLines(ChevronPoints(6F));
-            // A região coincide com o stroke. O recorte anterior usava 15 px,
-            // deixando uma faixa preta larga sobre a janela nativa de vídeo.
-            using var hitPen = new System.Drawing.Pen(System.Drawing.Color.White, 2.6F)
-            {
-                StartCap = System.Drawing.Drawing2D.LineCap.Round,
-                EndCap = System.Drawing.Drawing2D.LineCap.Round,
-                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
-            };
-            path.Widen(hitPen);
-            Region?.Dispose();
-            Region = new System.Drawing.Region(path);
-        }
-
-        protected override void OnResize(EventArgs e)
-        {
-            base.OnResize(e);
-            RebuildRegion();
-        }
-
-        protected override void OnMouseEnter(EventArgs e)
-        {
-            targetOpacity = 0.60F;
-            fadeTimer.Start();
-            base.OnMouseEnter(e);
-        }
-
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            targetOpacity = 0.18F;
-            fadeTimer.Start();
-            base.OnMouseLeave(e);
-        }
-
-        private void AnimateOpacity()
-        {
-            const float durationSteps = 10F; // 10 x 15 ms = 150 ms
-            float delta = (targetOpacity - currentOpacity) / durationSteps;
-            if (Math.Abs(targetOpacity - currentOpacity) < 0.012F)
-            {
-                currentOpacity = targetOpacity;
-                fadeTimer.Stop();
-            }
-            else
-            {
-                currentOpacity += delta;
-            }
-            Invalidate();
-        }
-
-        protected override void OnPaintBackground(Forms.PaintEventArgs e)
-        {
-            // O vídeo é uma janela nativa: não desenhar um retângulo sobre ele.
-        }
-
-        protected override void OnPaint(Forms.PaintEventArgs e)
-        {
-            // A região do HWND já é somente o stroke do chevron. Preenchê-la
-            // por inteiro evita fundo, outline, sombra e artefatos de transparência.
-            int intensity = Math.Clamp((int)Math.Round(255F * currentOpacity), 0, 255);
-            e.Graphics.Clear(System.Drawing.Color.FromArgb(intensity, intensity, intensity));
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-                fadeTimer.Dispose();
-            base.Dispose(disposing);
-        }
-    }
-
     private readonly Forms.TableLayoutPanel videoGrid = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -215,7 +98,6 @@ public partial class MainWindow : Window
     private readonly List<Forms.Label> videoBadges = [];
     private readonly List<Forms.Label> videoLoadingLabels = [];
     private readonly List<Forms.Panel> videoContainers = [];
-    private PtzChevronControl[] videoPtzEdgeButtons = [];
     private readonly HashSet<int> activePreviewWindows = [];
     private readonly ConcurrentDictionary<int, PreviewBinding> previewBindings = new();
     private readonly ConcurrentDictionary<int, byte> confirmedPreviewWindows = new();
@@ -279,6 +161,8 @@ public partial class MainWindow : Window
     private string captchaToken = string.Empty;
     private CancellationTokenSource? qrLoginCts;
     private bool qrBusy;
+    private bool accountBusy;
+    private bool cameraBusy;
     private bool accountLogoutInProgress;
     private int cloudGroupId;
     private string cloudAccessToken = string.Empty;
@@ -311,10 +195,6 @@ public partial class MainWindow : Window
         Environment.GetEnvironmentVariable("XMEYE_CONTROLLED_REQUEST_TEST"),
         "1",
         StringComparison.Ordinal);
-    private readonly Forms.Timer cameraHoverTimer = new()
-    {
-        Interval = 220
-    };
     private bool onlineRefreshBusy;
     private bool gridOpening;
     private readonly object gridLayoutQueueSync = new();
@@ -498,8 +378,6 @@ public partial class MainWindow : Window
             }
             RestoreConfiguredVideoGrid(onlyWhenChanged: true);
         };
-        cameraHoverTimer.Tick += (_, _) => UpdateCameraHoverControls();
-        cameraHoverTimer.Start();
         ConfigureVideoGrid(1);
         UpdateStreamQualityButtons();
         Loaded += OnLoaded;
@@ -566,7 +444,7 @@ public partial class MainWindow : Window
 
             Log("Driver SQLite: " +
                 (File.Exists(Path.Combine(plugins, "sqldrivers", "qsqlite.dll")) ? "carregado do pacote" : "ausente") + ".");
-            qtRuntime.Initialize();
+            qtRuntime.Initialize(GetQtPumpState);
             XMEyeBridge.EnableQtDiagnostics(Path.Combine(dataDirectory, "qt-sqlite.log"));
             int cmsResult = CmsSdk.CMS_Client_Init(string.Empty, sdkCallback, IntPtr.Zero, 0);
             sdkReady = cmsResult == 0;
@@ -1167,12 +1045,6 @@ public partial class MainWindow : Window
         };
 
         videoGrid.SuspendLayout();
-        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
-        {
-            edge.Parent?.Controls.Remove(edge);
-            edge.Dispose();
-        }
-        videoPtzEdgeButtons = [];
         foreach (Forms.Control control in videoGrid.Controls.Cast<Forms.Control>().ToArray())
             control.Dispose();
         videoGrid.Controls.Clear();
@@ -1264,8 +1136,6 @@ public partial class MainWindow : Window
                 badge.Top = label.Height + 4;
                 if (badge.Visible)
                     badge.BringToFront();
-                if (selectedPreviewWindow == window)
-                    PositionPtzEdgeButtons(container, label);
             }
             container.Resize += (_, _) => PositionBadge();
             PositionBadge();
@@ -1288,15 +1158,6 @@ public partial class MainWindow : Window
             videoContainers.Add(container);
             videoGrid.Controls.Add(container, index % side, index / side);
         }
-        // Existem exatamente quatro controles PTZ na árvore visual. Eles são
-        // movidos para o quadro selecionado; nunca são recriados por frame.
-        videoPtzEdgeButtons =
-        [
-            CreatePtzEdgeButton("Mover para cima", 0),
-            CreatePtzEdgeButton("Mover para baixo", 1),
-            CreatePtzEdgeButton("Mover para a esquerda", 2),
-            CreatePtzEdgeButton("Mover para a direita", 3)
-        ];
         selectedPreviewWindow = -1;
         soundingPreviewWindow = -1;
         audioDisplayPreviewWindow = -1;
@@ -1313,77 +1174,6 @@ public partial class MainWindow : Window
         PtzCameraText.Text = "Selecione uma câmera";
         SeparateWindowButton.IsEnabled = false;
         videoGrid.ResumeLayout(performLayout: true);
-    }
-
-    private PtzChevronControl CreatePtzEdgeButton(string tooltip, int command)
-    {
-        var button = new PtzChevronControl(command)
-        {
-            Margin = Forms.Padding.Empty,
-            Visible = false
-        };
-        button.MouseDown += (_, args) =>
-        {
-            if (args.Button != Forms.MouseButtons.Left)
-                return;
-            SendPtzCommand(command, stop: false);
-        };
-        button.MouseUp += (_, args) =>
-        {
-            if (args.Button == Forms.MouseButtons.Left)
-                StopPtzCommand();
-        };
-        button.MouseLeave += (_, _) => StopPtzCommand();
-        return button;
-    }
-
-    private void PositionPtzEdgeButtons(Forms.Panel container, Forms.Label label)
-    {
-        if (videoPtzEdgeButtons.Length != 4)
-            return;
-        PtzChevronControl up = videoPtzEdgeButtons[0];
-        PtzChevronControl down = videoPtzEdgeButtons[1];
-        PtzChevronControl left = videoPtzEdgeButtons[2];
-        PtzChevronControl right = videoPtzEdgeButtons[3];
-        int videoTop = label.Height;
-        int centerX = Math.Max(0, (container.ClientSize.Width - up.Width) / 2);
-        int centerY = Math.Max(videoTop, videoTop + (container.ClientSize.Height - videoTop - left.Height) / 2);
-        up.Location = new System.Drawing.Point(centerX, videoTop + 10);
-        down.Location = new System.Drawing.Point(
-            centerX,
-            Math.Max(videoTop + 10, container.ClientSize.Height - down.Height - 10));
-        left.Location = new System.Drawing.Point(10, centerY);
-        right.Location = new System.Drawing.Point(
-            Math.Max(10, container.ClientSize.Width - right.Width - 10),
-            centerY);
-        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
-            if (edge.Visible)
-                edge.BringToFront();
-    }
-
-    private void UpdateCameraHoverControls()
-    {
-        if (isClosing || videoPtzEdgeButtons.Length != 4)
-            return;
-        if (selectedPreviewWindow < 0 || selectedPreviewWindow >= videoContainers.Count)
-        {
-            foreach (PtzChevronControl edge in videoPtzEdgeButtons)
-                edge.Visible = false;
-            return;
-        }
-        System.Drawing.Point cursor = Forms.Cursor.Position;
-        Forms.Panel container = videoContainers[selectedPreviewWindow];
-        bool show = container.Visible && confirmedPreviewWindows.ContainsKey(selectedPreviewWindow) &&
-            previewBindings.TryGetValue(selectedPreviewWindow, out PreviewBinding? binding) &&
-            SupportsPtz(binding) &&
-            container.RectangleToScreen(container.ClientRectangle).Contains(cursor);
-        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
-        {
-            if (edge.Visible != show)
-                edge.Visible = show;
-            if (show)
-                edge.BringToFront();
-        }
     }
 
     private Forms.ContextMenuStrip CreatePreviewContextMenu(int window)
@@ -1566,18 +1356,6 @@ public partial class MainWindow : Window
             return;
 
         selectedPreviewWindow = window;
-        Forms.Panel selectedContainer = videoContainers[window];
-        foreach (PtzChevronControl edge in videoPtzEdgeButtons)
-        {
-            if (edge.Parent != selectedContainer)
-            {
-                edge.Parent?.Controls.Remove(edge);
-                selectedContainer.Controls.Add(edge);
-            }
-            edge.ContextMenuStrip = selectedContainer.ContextMenuStrip;
-            edge.Visible = false;
-        }
-        PositionPtzEdgeButtons(selectedContainer, videoLabels[window]);
         for (int index = 0; index < videoContainers.Count; index++)
         {
             bool selected = index == window;
@@ -2964,49 +2742,53 @@ public partial class MainWindow : Window
     {
         try
         {
-        await Task.Delay(250, cancellationToken).ConfigureAwait(true);
-        foreach (LocalMediaItem item in items.Where(candidate =>
-                     candidate.IsRecording && string.IsNullOrWhiteSpace(candidate.ThumbnailPath)))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (playingLocalMedia is not null ||
-                recordingPlaybackPanel.Width < 20 || recordingPlaybackPanel.Height < 20)
-                return;
-            if (!recordingPlayer.Open(item.File.FullName, recordingPlaybackPanel.Handle, playSound: false))
-                continue;
-            await Task.Delay(700, cancellationToken).ConfigureAwait(true);
-            string cache = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "XMEyeCloudAccountTester", "thumbnails");
-            Directory.CreateDirectory(cache);
-            string keySource = $"{item.File.FullName}|{item.File.Length}|{item.File.LastWriteTimeUtc.Ticks}";
-            string key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                Encoding.UTF8.GetBytes(keySource)));
-            string destination = Path.Combine(cache, key + ".jpg");
-            try
+            await Task.Delay(250, cancellationToken).ConfigureAwait(true);
+            foreach (LocalMediaItem item in items.Where(candidate =>
+                         candidate.IsRecording && string.IsNullOrWhiteSpace(candidate.ThumbnailPath)))
             {
-                System.Drawing.Point origin = recordingPlaybackPanel.PointToScreen(System.Drawing.Point.Empty);
-                using var bitmap = new System.Drawing.Bitmap(
-                    recordingPlaybackPanel.ClientSize.Width,
-                    recordingPlaybackPanel.ClientSize.Height,
-                    System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                using (System.Drawing.Graphics graphics = System.Drawing.Graphics.FromImage(bitmap))
-                    graphics.CopyFromScreen(origin, System.Drawing.Point.Empty,
-                        recordingPlaybackPanel.ClientSize,
-                        System.Drawing.CopyPixelOperation.SourceCopy);
-                bitmap.Save(destination, System.Drawing.Imaging.ImageFormat.Jpeg);
-                item.ThumbnailPath = destination;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (playingLocalMedia is not null ||
+                    recordingPlaybackPanel.Width < 20 || recordingPlaybackPanel.Height < 20)
+                    return;
+                if (!recordingPlayer.Open(item.File.FullName, recordingPlaybackPanel.Handle, playSound: false))
+                    continue;
+                try
+                {
+                    await Task.Delay(700, cancellationToken).ConfigureAwait(true);
+                    string cache = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "XMEyeCloudAccountTester", "thumbnails");
+                    Directory.CreateDirectory(cache);
+                    string keySource = $"{item.File.FullName}|{item.File.Length}|{item.File.LastWriteTimeUtc.Ticks}";
+                    string key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                        Encoding.UTF8.GetBytes(keySource)));
+                    string destination = Path.Combine(cache, key + ".jpg");
+                    System.Drawing.Point origin = recordingPlaybackPanel.PointToScreen(System.Drawing.Point.Empty);
+                    using var bitmap = new System.Drawing.Bitmap(
+                        recordingPlaybackPanel.ClientSize.Width,
+                        recordingPlaybackPanel.ClientSize.Height,
+                        System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (System.Drawing.Graphics graphics = System.Drawing.Graphics.FromImage(bitmap))
+                        graphics.CopyFromScreen(origin, System.Drawing.Point.Empty,
+                            recordingPlaybackPanel.ClientSize,
+                            System.Drawing.CopyPixelOperation.SourceCopy);
+                    bitmap.Save(destination, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    item.ThumbnailPath = destination;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Miniatura local não gerada: {ex.Message}");
+                }
+                finally
+                {
+                    recordingPlayer.Close();
+                    recordingPlaybackPanel.Invalidate();
+                }
             }
-            catch (Exception ex)
-            {
-                Log($"Miniatura local não gerada: {ex.Message}");
-            }
-            finally
-            {
-                recordingPlayer.Close();
-                recordingPlaybackPanel.Invalidate();
-            }
-        }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log("Falha ao gerar miniaturas: " + SanitizeDiagnostic(ex.Message)); }
@@ -5058,8 +4840,12 @@ public partial class MainWindow : Window
                     SetPreviewStatus(binding, "Aguardando sinal", System.Drawing.Color.Orange);
                     return;
                 }
+                PreviewResourceLogger.Write(
+                    "antes", binding.DeviceId, binding.Window, attempt);
                 int result = CmsSdk.CMS_Client_StartPreview(
                     binding.DeviceId, binding.Window, binding.Channel, binding.StreamType, false);
+                PreviewResourceLogger.Write(
+                    "depois-start", binding.DeviceId, binding.Window, attempt, result);
                 Log($"Recuperacao do preview: dispositivo {binding.DeviceId}; canal {binding.Channel}; " +
                     $"janela {binding.Window}; tentativa {attempt}; retorno {result}.");
                 if (result != 0)
@@ -5076,6 +4862,8 @@ public partial class MainWindow : Window
                         qtRuntime.ProcessEvents();
                         if (confirmedPreviewWindows.ContainsKey(binding.Window))
                         {
+                            PreviewResourceLogger.Write(
+                                "confirmado", binding.DeviceId, binding.Window, attempt, result);
                             SetPreviewStatus(binding, "Online", System.Drawing.Color.LimeGreen);
                             QueueAutomaticCapabilityDiscovery(binding);
                             Log($"Preview recuperado com imagem: dispositivo {binding.DeviceId}; " +
@@ -5089,6 +4877,8 @@ public partial class MainWindow : Window
                         await Task.Delay(100);
                     }
                 }
+                PreviewResourceLogger.Write(
+                    "sem-imagem", binding.DeviceId, binding.Window, attempt, result);
                 TimeSpan retryDelay = GetProtectedRetryDelay(binding.DeviceId);
                 if (!CanIssueDeviceRequest(binding.DeviceId, out _, out _, out _))
                 {
@@ -8261,6 +8051,7 @@ public partial class MainWindow : Window
 
     private void SetAccountBusy(bool busy)
     {
+        accountBusy = busy;
         AccountLoginButton.IsEnabled = !busy && sdkReady;
         RefreshCaptchaButton.IsEnabled = !busy && sdkReady;
         AccountLoginButton.Content = busy ? "CARREGANDO..." : "ENTRAR E CARREGAR CÂMERAS";
@@ -8268,11 +8059,27 @@ public partial class MainWindow : Window
 
     private void SetCameraBusy(bool busy)
     {
+        cameraBusy = busy;
         OpenCameraButton.IsEnabled = !busy && DeviceBox.SelectedItem is CloudApi.AccountDevice;
         OpenCameraButton.Content = busy ? "CONECTANDO..." : "ABRIR CÂMERA SELECIONADA";
         // Os botoes de layout continuam aceitando a ultima escolha. A fila
         // serializada coalesce cliques sem permitir duas montagens concorrentes.
         SetGridButtonsEnabled(accountDevices.Count > 0);
+    }
+
+    private QtPumpState GetQtPumpState()
+    {
+        bool active = playing || activePreviewWindows.Count > 0 || previewBindings.Count > 0 ||
+            gridOpening || accountBusy || cameraBusy || qrBusy || captchaBusy || onlineRefreshBusy ||
+            recoveringPreviewWindows.Count > 0 || disconnectedPreviewDevices.Count > 0 ||
+            recordingPreviewWindows.Count > 0 || recordingPlayer.IsOpen || talkInputOpen ||
+            pendingPtzConfigBuffers.Count > 0 || pendingBinaryConfigReads.Count > 0 ||
+            pendingBinaryConfigWrites.Count > 0 || pendingJsonConfigReads.Count > 0;
+        if (active)
+            return QtPumpState.Active;
+        return WindowState == WindowState.Minimized
+            ? QtPumpState.MinimizedIdle
+            : QtPumpState.VisibleIdle;
     }
 
     private void SetGridButtonsEnabled(bool enabled)
@@ -8575,7 +8382,6 @@ public partial class MainWindow : Window
     {
         isClosing = true;
         layoutRestoreTimer.Stop();
-        cameraHoverTimer.Stop();
         recordingPlaybackTimer.Stop();
         recordingThumbnailCts?.Cancel();
         recordingPlayer.Dispose();

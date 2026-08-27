@@ -3,16 +3,25 @@ using System.Windows.Threading;
 
 namespace XMEyeCloudTester;
 
+internal enum QtPumpState
+{
+    Active,
+    VisibleIdle,
+    MinimizedIdle
+}
+
 internal sealed class QtRuntime : IDisposable
 {
     private IntPtr application;
     private IntPtr argv;
     private IntPtr programName;
     private DispatcherTimer? eventPump;
+    private Func<QtPumpState>? pumpStateProvider;
 
-    internal void Initialize()
+    internal void Initialize(Func<QtPumpState>? stateProvider = null)
     {
         if (application != IntPtr.Zero) return;
+        pumpStateProvider = stateProvider;
         application = Marshal.AllocHGlobal(512);
         programName = Marshal.StringToHGlobalAnsi("XMEyeCloudTester");
         argv = Marshal.AllocHGlobal(IntPtr.Size * 2);
@@ -30,7 +39,23 @@ internal sealed class QtRuntime : IDisposable
 
     internal void ProcessEvents() => QCoreApplicationProcessEvents(0, 1);
 
-    private void PumpEvents(object? sender, EventArgs e) => ProcessEvents();
+    internal static TimeSpan IntervalFor(QtPumpState state) => state switch
+    {
+        QtPumpState.Active => TimeSpan.FromMilliseconds(25),
+        QtPumpState.VisibleIdle => TimeSpan.FromMilliseconds(100),
+        _ => TimeSpan.FromMilliseconds(250)
+    };
+
+    private void PumpEvents(object? sender, EventArgs e)
+    {
+        ProcessEvents();
+        if (eventPump is null || pumpStateProvider is null)
+            return;
+
+        TimeSpan desiredInterval = IntervalFor(pumpStateProvider());
+        if (eventPump.Interval != desiredInterval)
+            eventPump.Interval = desiredInterval;
+    }
 
     public void Dispose()
     {
@@ -40,6 +65,7 @@ internal sealed class QtRuntime : IDisposable
             eventPump.Tick -= PumpEvents;
             eventPump = null;
         }
+        pumpStateProvider = null;
         if (application != IntPtr.Zero)
         {
             try { QApplicationDestructor(application); } catch { }
