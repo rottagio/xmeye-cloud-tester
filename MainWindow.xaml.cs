@@ -261,6 +261,7 @@ public partial class MainWindow : Window
     private string ptzLogRemainder = string.Empty;
     private readonly Queue<string> ptzSystemResponses = new();
     private readonly Queue<string> ptzOrientationResponses = new();
+    private readonly Queue<string> genericJsonResponses = new();
     private readonly Queue<int> pendingPtzSystemDevices = new();
     private readonly Queue<int> pendingPtzOrientationDevices = new();
     private readonly CmsSdk.MessageCallback sdkCallback;
@@ -1980,6 +1981,7 @@ public partial class MainWindow : Window
                     ptzSystemResponses.Enqueue(json);
                 else if (json.Contains("\"Name\":\"Uart.PTZControlCmd\"", StringComparison.Ordinal))
                     ptzOrientationResponses.Enqueue(json);
+                genericJsonResponses.Enqueue(json);
             }
         }
         catch
@@ -5869,7 +5871,7 @@ public partial class MainWindow : Window
                 "Configurações da câmera", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        ShowFriendlyDeviceSettings(device);
+        ShowFunctionalDeviceSettings(device);
     }
 
     private void ShowFriendlyDeviceSettings(CloudApi.AccountDevice device)
@@ -5893,13 +5895,14 @@ public partial class MainWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var header = new StackPanel { Margin = new Thickness(26, 22, 26, 16) };
-        header.Children.Add(new TextBlock
+        var deviceTitle = new TextBlock
         {
             Text = device.Alias,
             Foreground = System.Windows.Media.Brushes.White,
             FontSize = 26,
             FontWeight = FontWeights.SemiBold
-        });
+        };
+        header.Children.Add(deviceTitle);
         header.Children.Add(new TextBlock
         {
             Text = "Configurações individuais desta câmera",
@@ -5958,6 +5961,28 @@ public partial class MainWindow : Window
             HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
         };
+
+        static System.Windows.Controls.Primitives.ToggleButton Toggle(
+            bool value, bool enabled = true) => new()
+        {
+            IsChecked = value,
+            IsEnabled = enabled,
+            Content = value ? "Ligado" : "Desligado",
+            MinWidth = 104,
+            Padding = new Thickness(14, 8, 14, 8),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        static string MaskIdentifier(string value)
+        {
+            value = value.Trim();
+            if (value.Length <= 4)
+                return "••••";
+            if (value.Length <= 8)
+                return value[..2] + "••••" + value[^2..];
+            return value[..4] + "••••" + value[^4..];
+        }
 
         static Border Card(string title, string description, string state,
             UIElement? action = null, bool available = true)
@@ -6037,11 +6062,117 @@ public partial class MainWindow : Window
             CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
             int? channels = profile?.ConfirmedChannelCount ?? entry.DetectedChannelCount;
 
-            StackPanel basics = Page("Básicas");
-            basics.Children.Add(Card("Nome", "Nome usado neste computador.", device.Alias));
-            basics.Children.Add(Card("Canais", "Quantidade de imagens confirmadas para este dispositivo.",
-                channels is int count ? $"{count} canal(is)" : "Será identificado durante o uso",
-                available: channels is not null));
+            StackPanel basics = Page("Configuração básica");
+            var renameButton = ActionButton("Alterar");
+            renameButton.Click += (_, _) =>
+            {
+                var renameDialog = new Window
+                {
+                    Owner = dialog,
+                    Title = "Nome da câmera",
+                    Width = 440,
+                    Height = 220,
+                    ResizeMode = ResizeMode.NoResize,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                    Background = new System.Windows.Media.SolidColorBrush(
+                        System.Windows.Media.Color.FromRgb(8, 20, 33))
+                };
+                var renamePanel = new StackPanel { Margin = new Thickness(22) };
+                renamePanel.Children.Add(new TextBlock
+                {
+                    Text = "Nome exibido no monitor",
+                    Foreground = System.Windows.Media.Brushes.White,
+                    FontSize = 18,
+                    FontWeight = FontWeights.SemiBold
+                });
+                var nameBox = new System.Windows.Controls.TextBox
+                {
+                    Text = device.Alias,
+                    MaxLength = 64,
+                    Margin = new Thickness(0, 12, 0, 16),
+                    Padding = new Thickness(9, 7, 9, 7)
+                };
+                var renameActions = new StackPanel
+                {
+                    Orientation = System.Windows.Controls.Orientation.Horizontal,
+                    HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+                };
+                renameActions.Children.Add(new System.Windows.Controls.Button
+                {
+                    Content = "Cancelar", IsCancel = true, Padding = new Thickness(15, 7, 15, 7)
+                });
+                var saveName = new System.Windows.Controls.Button
+                {
+                    Content = "Salvar", IsDefault = true, Padding = new Thickness(15, 7, 15, 7),
+                    Margin = new Thickness(8, 0, 0, 0)
+                };
+                saveName.Click += (_, _) =>
+                {
+                    if (string.IsNullOrWhiteSpace(nameBox.Text))
+                    {
+                        nameBox.Focus();
+                        return;
+                    }
+                    renameDialog.DialogResult = true;
+                };
+                renameActions.Children.Add(saveName);
+                renamePanel.Children.Add(nameBox);
+                renamePanel.Children.Add(renameActions);
+                renameDialog.Content = renamePanel;
+                nameBox.SelectAll();
+                nameBox.Focus();
+                if (renameDialog.ShowDialog() != true)
+                    return;
+
+                string name = nameBox.Text.Trim();
+                CameraCatalogStore.Entry selectedEntry = cameraCatalog.GetOrCreate(
+                    device, Math.Max(0, DeviceBox.SelectedIndex));
+                device.Alias = name;
+                selectedEntry.Name = name;
+                selectedEntry.UseCustomName = !string.Equals(
+                    name, selectedEntry.OnlineName, StringComparison.CurrentCultureIgnoreCase);
+                SaveCameraCatalog();
+                DeviceBox.Items.Refresh();
+                if (DeviceBox.SelectedItem == device)
+                    CameraNameBox.Text = name;
+                RefreshPreviewNames(device);
+                UpdateCameraSummary();
+                deviceTitle.Text = name;
+                dialog.Title = $"Configurações — {name}";
+                status.Text = "Nome salvo e aplicado à grade, aos títulos e às gravações deste monitor.";
+                RebuildPages(tabs.SelectedIndex);
+            };
+            basics.Children.Add(Card("Nome do dispositivo",
+                "Altera o nome usado em toda a interface deste monitor.", device.Alias,
+                renameButton));
+
+            CameraCatalogStore.Entry basicEntry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+            var mirrorToggle = Toggle(basicEntry.MirrorDisplay);
+            mirrorToggle.Click += (_, _) =>
+            {
+                bool enabled = mirrorToggle.IsChecked == true;
+                basicEntry.MirrorDisplay = enabled;
+                SaveCameraCatalog();
+                foreach (PreviewBinding binding in previewBindings.Values.Where(binding =>
+                             string.Equals(binding.CloudId, device.CloudId, StringComparison.Ordinal)))
+                    ApplySavedMirror(binding);
+                mirrorToggle.Content = enabled ? "Ligado" : "Desligado";
+                status.Text = enabled
+                    ? "Espelhamento aplicado às imagens desta câmera no monitor."
+                    : "Espelhamento removido das imagens desta câmera no monitor.";
+            };
+            basics.Children.Add(Card("Girar a imagem para esquerda-direita",
+                "Espelha imediatamente a imagem desta câmera neste monitor.",
+                basicEntry.MirrorDisplay ? "Ligado" : "Desligado", mirrorToggle));
+
+            if (Confirmed("Audio.SpeakerVolume"))
+                basics.Children.Add(Card("Volume do alto-falante",
+                    "Mesmo ajuste apresentado pelo aplicativo móvel.",
+                    "Disponível — leitura detalhada necessária antes de alterar"));
+            if (Confirmed("Network.Ntp"))
+                basics.Children.Add(Card("Configuração de hora",
+                    "Fuso horário, hora do dispositivo e sincronização.",
+                    "Disponível — consulte em Sobre"));
             tabs.Items.Add(Category("Básicas", basics));
 
             DeviceReadOnlyConfigStore.DeviceData local = readOnlyDeviceConfigs.GetOrCreate(device.CloudId);
@@ -6054,9 +6185,22 @@ public partial class MainWindow : Window
                     ? $"{local.Storage.DiskCount} unidade(s) informada(s)"
                     : $"{local.Storage.Partitions.Sum(item => item.TotalMegabytes) / 1024d:F1} GB — " +
                       $"{local.Storage.Partitions.Sum(item => item.FreeMegabytes) / 1024d:F1} GB livres";
-            storage.Children.Add(Card("Cartão e capacidade",
-                "Consulte o espaço informado pela câmera sem alterar o cartão.",
+            storage.Children.Add(Card("Cartão SD e capacidade",
+                "Capacidade total e espaço livre informados pela câmera.",
                 storageState, storageButton, local.Storage is not null));
+            if (local.Storage is not null)
+            {
+                foreach (DeviceReadOnlyConfigStore.PartitionInfo partition in local.Storage.Partitions)
+                    storage.Children.Add(Card("Partição de armazenamento",
+                        string.IsNullOrWhiteSpace(partition.FileSystem)
+                            ? "Partição informada pelo dispositivo."
+                            : $"Sistema de arquivos: {partition.FileSystem}",
+                        $"{partition.TotalMegabytes / 1024d:F1} GB no total — " +
+                        $"{partition.FreeMegabytes / 1024d:F1} GB livres"));
+                storage.Children.Add(Card("Armazenamento completo",
+                    "O comportamento de sobrescrita só será alterado após leitura e validação do payload.",
+                    "Somente consulta nesta versão"));
+            }
             storageButton.Click += async (_, _) =>
             {
                 PreviewBinding? online = OnlineBinding();
@@ -6083,12 +6227,29 @@ public partial class MainWindow : Window
                 : local.RecordingByChannel.Values.FirstOrDefault();
             var recordingButton = ActionButton(recordingInfo is null ? "Consultar" : "Atualizado");
             recordingButton.IsEnabled = recordingInfo is null;
+            string recordingMode = recordingInfo?.RecordModeCode switch
+            {
+                0 => "Gravação agendada",
+                1 => "Gravação manual",
+                2 => "Sem gravação",
+                _ => recordingInfo is null ? "" : $"Modo {recordingInfo.RecordModeCode}"
+            };
             string recordingState = recordingInfo is null
                 ? "Ainda não consultado"
-                : $"Modo {recordingInfo.RecordModeCode} — arquivos de {recordingInfo.PacketLengthMinutes} min";
-            recording.Children.Add(Card("Gravação no dispositivo",
-                "Veja o plano de gravação informado pela câmera. Alterações permanecem protegidas.",
+                : $"{recordingMode} — arquivos de {recordingInfo.PacketLengthMinutes} min";
+            recording.Children.Add(Card("Configurações de gravação",
+                "Modo, destino e duração dos arquivos gravados pela câmera.",
                 recordingState, recordingButton, recordingInfo is not null));
+            if (recordingInfo is not null)
+            {
+                recording.Children.Add(Card("Duração da gravação",
+                    "Duração atual de cada arquivo de vídeo.",
+                    $"{recordingInfo.PacketLengthMinutes} minuto(s)"));
+                recording.Children.Add(Card("Destino da gravação",
+                    "Armazenamento selecionado pelo dispositivo.",
+                    recordingInfo.UsesSd ? "Cartão SD" : recordingInfo.UsesSata
+                        ? "Disco interno" : recordingInfo.UsesUsb ? "USB" : "Não identificado"));
+            }
             recordingButton.Click += async (_, _) =>
             {
                 PreviewBinding? online = OnlineBinding();
@@ -6109,7 +6270,9 @@ public partial class MainWindow : Window
 
             void AddFeaturePage(string category, params (string Key, string Title, string Description)[] features)
             {
-                var supported = features.Where(feature => Confirmed(feature.Key)).ToArray();
+                var supported = features.Where(feature =>
+                    DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration(feature.Key) &&
+                    Confirmed(feature.Key)).ToArray();
                 if (supported.Length == 0)
                     return;
                 StackPanel page = Page(category);
@@ -6161,8 +6324,10 @@ public partial class MainWindow : Window
                         status.Text = result.Message;
                         RebuildPages(tabs.SelectedIndex);
                     };
-                    alarm.Children.Add(Card("Luz branca", "Ajuste a intensidade da luz desta câmera.",
-                        light is null ? "Carregue o valor atual antes de alterar" : $"Nível atual: {light.Level}",
+                    alarm.Children.Add(Card("Modo de controle da luz",
+                        "Consulta o modo, a duração e a intensidade da luz desta câmera.",
+                        light is null ? "Carregue os valores atuais antes de alterar" :
+                            $"{light.WorkMode} — nível {light.Level} — {light.DurationSeconds}s",
                         lightAction, light is not null));
                 }
                 if (Confirmed("Alarm.VoiceType"))
@@ -6175,13 +6340,10 @@ public partial class MainWindow : Window
                 ("Audio.SpeakerVolume", "Volume do alto-falante", "Volume de reprodução e avisos."),
                 ("Audio.MicrophoneVolume", "Volume do microfone", "Nível de captura de áudio."));
             AddFeaturePage("Rede",
-                ("Network.Wifi", "Wi‑Fi", "Rede sem fio utilizada pelo dispositivo."),
-                ("Network.Ntp", "Data e hora", "Sincronização automática de horário."),
-                ("Network.Rtsp", "RTSP", "Transmissão direta compatível com o dispositivo."));
+                ("Network.Wifi", "Configurações de Wi‑Fi", "Modo de rede e rede sem fio utilizada pelo dispositivo."));
             AddFeaturePage("Avançadas",
-                ("Ptz.Configuration", "PTZ", "Orientação e movimento da câmera."),
-                ("Ptz.Presets", "Posições favoritas", "Posições PTZ salvas no dispositivo."),
-                ("Camera.Parameters", "Imagem", "Parâmetros de vídeo da câmera."));
+                ("Tracking.Motion", "Rastreamento de movimento", "Ativação e sensibilidade do rastreamento."),
+                ("Camera.Parameters", "Imagem e WDR", "Orientação, visão diurna/noturna e compensação WDR."));
 
             StackPanel about = Page("Sobre");
             about.Children.Add(Card("Modelo", "Modelo informado pelo dispositivo ou provedor.",
@@ -6190,6 +6352,13 @@ public partial class MainWindow : Window
             about.Children.Add(Card("Firmware", "Versão instalada na câmera.",
                 string.IsNullOrWhiteSpace(profile?.Firmware) ? "Não informado" : profile.Firmware,
                 available: !string.IsNullOrWhiteSpace(profile?.Firmware)));
+            about.Children.Add(Card("Identificador do dispositivo",
+                "Identificador mascarado para evitar exposição acidental.",
+                MaskIdentifier(device.CloudId)));
+            about.Children.Add(Card("Canais de vídeo",
+                "Quantidade confirmada por imagens realmente recebidas.",
+                channels is int count ? $"{count} canal(is)" : "Ainda não identificado",
+                available: channels is not null));
             tabs.Items.Add(Category("Sobre", about));
 
             tabs.SelectedIndex = Math.Clamp(selectedIndex, 0, tabs.Items.Count - 1);
@@ -8248,6 +8417,14 @@ public partial class MainWindow : Window
         if (isClosing)
             return;
         if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
+            pendingJsonConfigReads.ContainsKey((p2, p4)))
+        {
+            RecordDeviceRequestResult(p2, p1);
+            HandleJsonConfigResponse(p1, p2, p4);
+            WriteDiagnosticLine($"[{DateTime.Now:HH:mm:ss}] SDK {type}: JSON {p1}, {p2}, {p3}, {p4}.{Environment.NewLine}");
+            return;
+        }
+        if (type == CmsSdk.MessageType.DeviceRemoteConfig &&
             pendingBinaryConfigWrites.ContainsKey((p2, p4)))
         {
             RecordDeviceRequestResult(p2, p1);
@@ -8421,6 +8598,16 @@ public partial class MainWindow : Window
                 Marshal.FreeHGlobal(request.Buffer);
             request.Completion.TrySetResult(null);
         }
+        foreach (var pending in pendingJsonConfigReads.ToArray())
+        {
+            if (!pendingJsonConfigReads.TryRemove(pending.Key, out PendingJsonConfigRead? request))
+                continue;
+            if (request.Buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(request.Buffer);
+            request.Completion.TrySetResult(null);
+        }
+        lock (ptzLogLock)
+            genericJsonResponses.Clear();
         StopPtzCommand();
         StopActiveTalk();
         try

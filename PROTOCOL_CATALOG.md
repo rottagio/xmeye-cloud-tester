@@ -63,25 +63,25 @@ A tela **Configurações da câmera** é montada a partir do perfil do dispositi
 - informa a quantidade de recursos confirmados, incompatíveis e ainda não identificados;
 - identifica recursos de leitura/gravação; somente editores liberados explicitamente pela política podem alterar o dispositivo.
 
-## Escrita controlada da versão 0.15
+## Escrita controlada da versão 0.16
 
-A única alteração remota liberada é o **nível da luz branca**, e apenas quando a câmera confirmou `Camera.WhiteLight` e uma leitura inicial válida existe.
+Os editores do menu usam uma lista positiva por configuração. Cada editor só é habilitado quando a câmera devolve o bloco e o campo correspondente em uma leitura válida.
 
 Fluxo obrigatório:
 
 1. câmera com imagem online e fora de cooldown;
 2. leitura fresca do bloco completo;
-3. validação do nível entre 0 e 100;
-4. confirmação explícita do usuário mostrando câmera, canal, valor anterior e novo;
+3. validação de tipo e intervalo do campo alterado;
+4. confirmação adicional para alterações sensíveis, como a troca de Wi-Fi;
 5. uma única gravação pelo comando confirmado do VMS Pro;
 6. nova leitura após a gravação;
 7. sucesso somente se o dispositivo devolver o valor solicitado;
 8. se devolver outro valor, uma única restauração do bloco original e uma leitura de confirmação;
 9. se não houver resposta, nenhuma repetição ou restauração incerta é enviada.
 
-Há intervalo mínimo persistente de dois minutos entre alterações. Rede, firmware, formatação, alarmes e plano de gravação remoto permanecem bloqueados nesta versão.
+Há intervalo mínimo persistente entre alterações do mesmo bloco. Wi-Fi exige uma confirmação adicional; firmware e formatação continuam fora do fluxo comum por serem operações destrutivas.
 
-## Interface de configurações da versão 0.15.1
+## Interface de configurações da versão 0.16
 
 O botão **Configurações da câmera** abre uma interface voltada ao cliente, não a tabela técnica:
 
@@ -89,7 +89,27 @@ O botão **Configurações da câmera** abre uma interface voltada ao cliente, n
 - cartões no mesmo tema visual do monitor;
 - textos simples, sem nomes de protocolo, evidências ou códigos internos;
 - botões somente para ações realmente implementadas;
-- categorias incompatíveis são ocultadas;
-- recursos compatíveis ainda protegidos são identificados claramente, sem controles falsos.
+- as categorias do aplicativo móvel permanecem estáveis e campos ausentes no firmware aparecem desabilitados;
+- nome, imagem, gravação, detecção, rastreamento, luz, áudio, armazenamento, hora e Wi-Fi usam os valores realmente devolvidos pelo aparelho;
+- WeChat, não perturbe e preferências de notificação do sistema são identificados como funções do celular, não como configurações da câmera.
 
 A tabela de compatibilidade continua separada como ferramenta de diagnóstico e não é usada para configurar a câmera.
+
+### Fluxo confirmado no VMS Pro
+
+Os logs instrumentados do VMS Pro confirmam que a configuração é carregada por dispositivo e por seção:
+
+1. ao obter o contexto do dispositivo, consulta `SystemInfo` (`1020`) e `SystemFunction` (`1360`);
+2. as páginas pedem somente os blocos necessários com a leitura JSON genérica `1042`;
+3. o canal é `-1` para dados do dispositivo e `0..N` para configurações por canal;
+4. uma alteração envia o bloco validado com `1040` e precisa ser relida antes de a interface confirmar o novo valor.
+
+Na captura instrumentada, o VMS consultou sob demanda `General.General`, `General.Location`,
+`System.TimeZone`, `OPTimeQuery`, `Detect.HumanDetection`, `Camera.WhiteLight`,
+`fVideo.Volume`, `fVideo.VolumeIn` e `Uart.PTZControlCmd`. O VMS de desktop não apresenta
+todas as páginas específicas do aplicativo móvel; por isso a organização do menu segue a
+experiência móvel, enquanto os nomes de comando e payloads precisam continuar comprovados
+individualmente no VMS/FunSDK antes de liberar cada escrita.
+
+O menu comum não deve expor ferramentas técnicas como RTSP, atualização de firmware ou
+posições PTZ. Essas funções pertencem a áreas próprias do produto ou permanecem protegidas.

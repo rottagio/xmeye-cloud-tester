@@ -133,6 +133,16 @@ Require(DeviceSettingsPresentationPolicy.OfferSafeProbe("Storage.Info") &&
         DeviceSettingsPresentationPolicy.OfferSafeProbe("Recording.Main") &&
         !DeviceSettingsPresentationPolicy.OfferSafeProbe("Network.Wifi"),
     "A tela ofereceu uma sondagem fora da lista segura.");
+Require(DeviceSettingsPresentationPolicy.CustomerSections.SequenceEqual(
+        ["Básicas", "Armazenamento", "Gravação", "Alarme inteligente",
+         "Som e luz", "Áudio", "Rede", "Avançadas", "Sobre"]),
+    "As seções do menu deixaram de acompanhar a experiência do aplicativo móvel.");
+Require(DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration("Alarm.Human") &&
+        DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration("Network.Wifi") &&
+        !DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration("Network.Rtsp") &&
+        !DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration("Ptz.Presets") &&
+        !DeviceSettingsPresentationPolicy.IsCustomerFacingConfiguration("Firmware.Upgrade"),
+    "Uma opção técnica voltou ao menu comum ou uma configuração do cliente foi removida.");
 Console.WriteLine("DEVICE_SETTINGS_PRESENTATION_POLICY_OK");
 
 DeviceConfigurationCatalog.Definition lightDefinition =
@@ -154,8 +164,12 @@ Require(!DeviceConfigurationWritePolicy.CanWrite(
 lightBinding.LastWriteAtUtc = DateTime.UtcNow;
 Require(!DeviceConfigurationWritePolicy.CanWrite(
         lightDefinition, lightBinding, true, DateTime.UtcNow, out TimeSpan writeWait, out _) &&
-        writeWait > TimeSpan.FromMinutes(1),
+        writeWait > TimeSpan.FromSeconds(1),
     "O intervalo entre alterações remotas não foi aplicado.");
+Require(DeviceConfigurationWritePolicy.CanWrite(
+        networkDefinition, new DeviceProfileStore.ConfigurationBinding { Supported = true },
+        true, true, DateTime.UtcNow, out _, out _),
+    "Explicitly confirmed sensitive writes must be allowed.");
 Require(DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(0) &&
         DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(100) &&
         !DeviceConfigurationWritePolicy.IsValidWhiteLightLevel(101),
