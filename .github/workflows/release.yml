@@ -56,8 +56,15 @@ jobs:
           Compress-Archive -Path .\release-patch\* -DestinationPath .\XMEyeCloudTester-update.zip
 
       - name: Criar Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || startsWith(github.event.head_commit.message, '[release]')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" .\XMEyeCloudTester-update.zip --generate-notes --title "XMEye Cloud Tester ${{ github.ref_name }}"
+        run: |
+          $releaseTag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } else {
+            $version = ([xml](Get-Content .\XMEyeCloudTester.csproj)).Project.PropertyGroup.Version
+            "v$version"
+          }
+          gh release create $releaseTag .\XMEyeCloudTester-update.zip --target "${{ github.sha }}" --generate-notes --title "XMEye Cloud Tester $releaseTag"
