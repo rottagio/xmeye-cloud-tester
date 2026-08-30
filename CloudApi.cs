@@ -22,7 +22,7 @@ internal static class CloudApi
         public required string Alias { get; set; }
         internal required string DeviceUser { get; set; }
         internal required string DevicePassword { get; set; }
-        internal string AdminToken { get; init; } = string.Empty;
+        internal string AdminToken { get; set; } = string.Empty;
         internal bool IsShared { get; init; }
         public string LocalGroup { get; set; } = "Casa";
         public bool ShowInLiveView { get; set; } = true;
