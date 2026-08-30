@@ -179,6 +179,19 @@ internal static class CmsSdk
         }
     }
 
+    internal static unsafe string GetAdminToken(ref DeviceInfo info)
+    {
+        fixed (byte* value = info.AdminToken)
+        {
+            int length = 0;
+            while (length < 0x100 && value[length] != 0)
+                length++;
+            return length == 0
+                ? string.Empty
+                : System.Text.Encoding.UTF8.GetString(value, length);
+        }
+    }
+
     internal static unsafe bool HasOemId(ref DeviceInfo info)
     {
         fixed (byte* value = info.OemId)

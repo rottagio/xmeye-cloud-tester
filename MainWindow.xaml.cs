@@ -5405,13 +5405,35 @@ public partial class MainWindow : Window
             }
             if (found != 0 && existing.ID > 0)
             {
+                // O VMS Pro reaplica em CMS_Client_EditDevice o AdminToken
+                // retornado pela lista da conta antes de iniciar o monitor de
+                // vinculo. Esse token pode mudar depois que uma camera e
+                // reiniciada. Manter o cadastro antigo faz o transporte RPS
+                // chegar ao dispositivo, mas o login ser recusado (-70137).
+                //
+                // EditDevice preserva integralmente a estrutura lida do CMS e
+                // troca somente o token. Nao remove o cadastro, nao dispara
+                // uma tentativa extra e nao altera configuracao da camera.
+                if (!device.IsNetworkDevice && device.AdminToken.Length > 0)
+                {
+                    string storedToken = CmsSdk.GetAdminToken(ref existing);
+                    if (!string.Equals(storedToken, device.AdminToken, StringComparison.Ordinal))
+                    {
+                        CmsSdk.SetAdminToken(ref existing, device.AdminToken);
+                        int edited = CmsSdk.CMS_Client_EditDevice(existing.ID, ref existing);
+                        if (edited != 0)
+                        {
+                            failed++;
+                            Log($"CMS recusou a renovacao protegida do token do dispositivo {existing.ID}: retorno {edited}.");
+                            continue;
+                        }
+                        Log($"Token remoto do dispositivo {existing.ID} renovado no cadastro local do CMS.");
+                    }
+                }
                 TrackDeviceRequestProtection(device, existing.ID);
-                // Sincronizar a conta nunca deve remover e recriar um cadastro
-                // existente. Essa operação reinicia a máquina de login P2P e,
-                // multiplicada por todas as câmeras a cada abertura do app,
-                // pode produzir a rajada que termina em bloqueio -27.
-                // Credenciais só são substituídas por uma ação explícita do
-                // usuário na tela da câmera.
+                // A sincronizacao nao remove nem recria o cadastro. Essa
+                // operacao reiniciaria a maquina P2P de todas as cameras e
+                // poderia produzir a rajada que termina em bloqueio -27.
                 synchronized++;
                 continue;
             }
