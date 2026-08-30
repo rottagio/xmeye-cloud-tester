@@ -116,6 +116,8 @@ public partial class MainWindow : Window
     private readonly SemaphoreSlim p2pReloginGate = new(1, 1);
     private readonly ConcurrentDictionary<int, DeviceRequestProtection> deviceRequestProtections = new();
     private readonly ConcurrentDictionary<int, string> deviceCloudIds = new();
+    private readonly ConcurrentDictionary<int, byte> refreshingRejectedDeviceTokens = new();
+    private readonly ConcurrentDictionary<int, DateTime> lastRejectedTokenRefreshUtc = new();
     private readonly ConcurrentQueue<PreviewBinding> capabilityDiscoveryQueue = new();
     private readonly ConcurrentDictionary<string, byte> queuedCapabilityDiscovery = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> attemptedCapabilityDiscovery = new(StringComparer.Ordinal);
@@ -4412,6 +4414,94 @@ public partial class MainWindow : Window
             ClearPersistedDeviceProtection(device);
     }
 
+    private void ResetDeviceRequestProtectionAfterTokenRefresh(
+        CloudApi.AccountDevice device, int cmsDeviceId)
+    {
+        DeviceRequestProtection protection = deviceRequestProtections.GetOrAdd(
+            cmsDeviceId, _ => new DeviceRequestProtection());
+        lock (protection.Sync)
+        {
+            protection.ConsecutiveFailures = 0;
+            protection.LastError = 0;
+            protection.LastFailureUtc = default;
+            protection.NextAllowedUtc = default;
+        }
+        CameraCatalogStore.Entry entry = cameraCatalog.GetOrCreate(device, int.MaxValue);
+        if (entry.LastRequestError != 0 || entry.RequestBlockedUntilUtc is not null)
+        {
+            entry.LastRequestError = 0;
+            entry.RequestBlockedUntilUtc = null;
+            SaveCameraCatalog();
+        }
+    }
+
+    private async Task RefreshRejectedDeviceTokenAsync(
+        CloudApi.AccountDevice device, int cmsDeviceId)
+    {
+        if (device.IsNetworkDevice || device.AdminToken.Length == 0 ||
+            cloudAccessToken.Length == 0 || isClosing || accountLogoutInProgress)
+            return;
+
+        DateTime now = DateTime.UtcNow;
+        if (lastRejectedTokenRefreshUtc.TryGetValue(cmsDeviceId, out DateTime lastAttempt) &&
+            now - lastAttempt < TimeSpan.FromMinutes(10))
+            return;
+        if (!refreshingRejectedDeviceTokens.TryAdd(cmsDeviceId, 0))
+            return;
+
+        lastRejectedTokenRefreshUtc[cmsDeviceId] = now;
+        try
+        {
+            Log($"Autenticacao por token recusada no dispositivo {cmsDeviceId}; consultando uma vez o token atual da conta.");
+            QrCloudApi.DeviceTokenResult result = await Task.Run(
+                () => QrCloudApi.QueryDeviceToken(cloudAccessToken, device.CloudId));
+            if (result.Code != 2000 || result.AdminToken.Length == 0)
+            {
+                Log($"A nuvem nao forneceu token renovado para o dispositivo {cmsDeviceId}; codigo {result.Code}. Nenhuma nova tentativa foi enviada.");
+                return;
+            }
+            if (string.Equals(result.AdminToken, device.AdminToken, StringComparison.Ordinal))
+            {
+                Log($"A nuvem devolveu para o dispositivo {cmsDeviceId} o mesmo token ja recusado. Nenhuma nova tentativa foi enviada.");
+                return;
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (isClosing || accountLogoutInProgress)
+                    return;
+                CmsSdk.DeviceInfo existing = default;
+                if (GetCmsDeviceInfo(device.CloudId, ref existing) == 0 ||
+                    existing.ID != cmsDeviceId)
+                {
+                    Log($"O cadastro local do dispositivo {cmsDeviceId} mudou durante a renovacao; operacao cancelada.");
+                    return;
+                }
+                CmsSdk.SetAdminToken(ref existing, result.AdminToken);
+                int edited = CmsSdk.CMS_Client_EditDevice(cmsDeviceId, ref existing);
+                if (edited != 0)
+                {
+                    Log($"CMS recusou o token consultado para o dispositivo {cmsDeviceId}: retorno {edited}.");
+                    return;
+                }
+
+                device.AdminToken = result.AdminToken;
+                ResetDeviceRequestProtectionAfterTokenRefresh(device, cmsDeviceId);
+                automaticDeviceLoginResults.TryRemove(cmsDeviceId, out _);
+                int login = CmsSdk.CMS_Client_DeviceLoginOrLogout(cmsDeviceId, true);
+                Log($"Token atual do dispositivo {cmsDeviceId} aplicado; uma unica confirmacao de login foi enviada: retorno {login}.");
+            });
+        }
+        catch (Exception ex)
+        {
+            Log($"Falha ao consultar o token atual do dispositivo {cmsDeviceId}: {SanitizeDiagnostic(ex.Message)}");
+        }
+        finally
+        {
+            refreshingRejectedDeviceTokens.TryRemove(cmsDeviceId, out _);
+        }
+    }
+
     private bool CanIssueDeviceRequest(
         int device, out TimeSpan wait, out bool blockedByDevice, out int lastError)
     {
@@ -8199,6 +8289,8 @@ public partial class MainWindow : Window
         SetGridButtonsEnabled(false);
         accountDevices.Clear();
         automaticDeviceLoginResults.Clear();
+        refreshingRejectedDeviceTokens.Clear();
+        lastRejectedTokenRefreshUtc.Clear();
         UpdateCameraSummary();
     }
 
@@ -8605,6 +8697,8 @@ public partial class MainWindow : Window
                         ? "Offline"
                         : "Online";
                     DeviceBox.Items.Refresh();
+                    if (p1 == 3 && p4 == -27)
+                        _ = RefreshRejectedDeviceTokenAsync(changedDevice, p2);
                 }
                 UpdateCameraSummary();
             }
