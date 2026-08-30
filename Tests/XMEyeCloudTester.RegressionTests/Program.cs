@@ -36,8 +36,8 @@ Require(ConnectionRecoveryPolicy.ErrorCooldown(-27, 1) == TimeSpan.FromHours(1),
     "O bloqueio -27 não preservou a quarentena de uma hora.");
 Require(ConnectionRecoveryPolicy.ErrorCooldown(-25, 1) == TimeSpan.FromMinutes(10),
     "O limite -25 não recebeu a pausa de dez minutos.");
-Require(ConnectionRecoveryPolicy.ErrorCooldown(-8, 1) == TimeSpan.FromMinutes(10),
-    "O erro -8 não preservou o mínimo de dez minutos.");
+Require(ConnectionRecoveryPolicy.ErrorCooldown(-8, 1) == TimeSpan.FromMinutes(1),
+    "O erro transitório -8 não respeitou a tentativa única por minuto.");
 Require(ConnectionRecoveryPolicy.ErrorCooldown(-7, 3) == TimeSpan.FromMinutes(1),
     "A falha transitória passou a deixar a câmera sem tentativa por vários minutos.");
 Require(ConnectionRecoveryPolicy.PassiveGrace(unstable: true) == TimeSpan.FromSeconds(15),
@@ -53,9 +53,14 @@ Require(ConnectionRecoveryPolicy.PreviewSpacing == TimeSpan.FromSeconds(3),
 Require(ConnectionRecoveryPolicy.ChannelRetryDelay(15) == TimeSpan.FromMinutes(1) &&
         ConnectionRecoveryPolicy.ChannelRetryDelay(300) == TimeSpan.FromMinutes(5),
     "A repetição protegida do canal perdeu o intervalo configurado.");
-Require(!ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(-25) &&
-        ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(-27),
-    "O callback online não distingue limite transitório de bloqueio do dispositivo.");
+Require(ConnectionRecoveryPolicy.IsPersistentRequestError(-27) &&
+        ConnectionRecoveryPolicy.IsPersistentRequestError(-25) &&
+        !ConnectionRecoveryPolicy.IsPersistentRequestError(-8),
+    "A classificação dos erros persistentes de conexão foi alterada.");
+Require(ConnectionRecoveryPolicy.CurrentResultSupersedesPersistedError(-27, -7) &&
+        ConnectionRecoveryPolicy.CurrentResultSupersedesPersistedError(-25, -8) &&
+        !ConnectionRecoveryPolicy.CurrentResultSupersedesPersistedError(-27, -27),
+    "Um estado atual transitório não substitui corretamente a quarentena antiga.");
 Console.WriteLine("CONNECTION_RECOVERY_POLICY_OK");
 
 Require(new AppPreferences().AutoReconnect,

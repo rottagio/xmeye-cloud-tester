@@ -4362,14 +4362,9 @@ public partial class MainWindow : Window
         {
             if (result > 0)
             {
-                // O monitor nativo confirmar a sessão significa que o limite
-                // transitório -25 já foi superado; manter essa proteção faria a
-                // grade ignorar uma câmera que acabou de responder online. O -27
-                // continua preservado porque é bloqueio explícito do dispositivo.
-                if (ConnectionRecoveryPolicy.PreserveCooldownAfterPositiveMonitorCallback(
-                        protection.LastError) &&
-                    protection.NextAllowedUtc > DateTime.UtcNow)
-                    return;
+                // Um callback atual positivo prova que a sessão voltou. Um erro
+                // persistido de uma execução anterior não pode manter uma câmera
+                // já recuperada fora da grade.
                 protection.ConsecutiveFailures = 0;
                 protection.LastError = 0;
                 protection.LastFailureUtc = default;
@@ -4379,6 +4374,7 @@ public partial class MainWindow : Window
             else
             {
                 DateTime now = DateTime.UtcNow;
+                int previousError = protection.LastError;
                 if (result is -27 or -25 &&
                     protection.LastError == result && protection.NextAllowedUtc > now)
                 {
@@ -4401,6 +4397,15 @@ public partial class MainWindow : Window
                 protection.NextAllowedUtc = now + cooldown;
                 if (result is -27 or -25)
                     PersistDeviceProtection(device, result, protection.NextAllowedUtc);
+                else if (ConnectionRecoveryPolicy.CurrentResultSupersedesPersistedError(
+                             previousError, result))
+                {
+                    // A câmera pode ter sido reiniciada enquanto o aplicativo
+                    // estava fechado. Um retorno atual transitório substitui o
+                    // -27/-25 antigo: apaga a quarentena persistida e deixa o
+                    // vigia fazer uma única nova tentativa por dispositivo.
+                    clearPersisted = true;
+                }
             }
         }
         if (clearPersisted)

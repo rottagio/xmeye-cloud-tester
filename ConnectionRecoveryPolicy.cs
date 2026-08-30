@@ -19,12 +19,10 @@ internal static class ConnectionRecoveryPolicy
         if (error == -25)
             return ConnectionLimitCooldown;
 
-        if (error == -8)
-            return TimeSpan.FromMinutes(10);
-
-        // -7/-4 são falhas transitórias comuns durante a retomada P2P. Uma
+        // -8/-7/-4 são falhas transitórias comuns durante a retomada P2P. Uma
         // única tentativa por dispositivo a cada minuto mantém a recuperação
-        // ativa sem produzir rajadas no SDK.
+        // ativa sem produzir rajadas no SDK. O VMS também volta a testar o
+        // login do dispositivo; não deixa o preview parado por dez minutos.
         return TimeSpan.FromMinutes(1);
     }
 
@@ -44,7 +42,12 @@ internal static class ConnectionRecoveryPolicy
     internal static TimeSpan ChannelRetryDelay(int configuredSeconds) =>
         TimeSpan.FromSeconds(Math.Max(60, configuredSeconds));
 
-    internal static bool PreserveCooldownAfterPositiveMonitorCallback(int error) =>
-        error == -27;
+    internal static bool IsPersistentRequestError(int error) =>
+        error is -27 or -25;
+
+    internal static bool CurrentResultSupersedesPersistedError(
+        int previousError, int currentResult) =>
+        IsPersistentRequestError(previousError) &&
+        !IsPersistentRequestError(currentResult);
 
 }

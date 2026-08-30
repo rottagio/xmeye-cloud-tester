@@ -24,6 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
+          dotnet run --project .\Tests\XMEyeCloudTester.RegressionTests\XMEyeCloudTester.RegressionTests.csproj -c Release
           dotnet build .\Launcher\XMEyeCloudTester.Launcher.csproj -c Release -p:Version=$version -p:AssemblyVersion="$version.0" -p:FileVersion="$version.0"
           dotnet build .\XMEyeCloudTester.csproj -c Release -p:Version=$version -p:AssemblyVersion="$version.0" -p:FileVersion="$version.0"
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
