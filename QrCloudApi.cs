@@ -386,6 +386,7 @@ internal static class QrCloudApi
                     diagnostics.PasswordLength16++;
             }
             string adminToken = string.Empty;
+            string oldAdminToken = string.Empty;
             if (deviceUser.Length == 0 || devicePassword.Length == 0)
             {
                 (string decodedUser, string decodedPassword) = DecodePowersCredentials(
@@ -403,6 +404,7 @@ internal static class QrCloudApi
             {
                 diagnostics.DeviceTokenObjects++;
                 adminToken = FirstString(deviceToken, "AdminToken", "adminToken");
+                oldAdminToken = FirstString(deviceToken, "OldAdminToken", "oldAdminToken");
                 if (adminToken.Length > 0)
                     diagnostics.AdminTokenPresent++;
                 string pwdToken = FirstString(deviceToken, "PWDToken", "pwdToken");
@@ -435,6 +437,7 @@ internal static class QrCloudApi
                 DeviceUser = deviceUser,
                 DevicePassword = devicePassword,
                 AdminToken = adminToken,
+                OldAdminToken = oldAdminToken,
                 IsShared = isShared,
                 Model = FirstString(element, "devType", "model", "deviceType", "type"),
                 Firmware = FirstString(element, "softVersion", "firmware", "version", "softwareVersion"),

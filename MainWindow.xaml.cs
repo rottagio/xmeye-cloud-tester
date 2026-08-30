@@ -118,6 +118,7 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<int, string> deviceCloudIds = new();
     private readonly ConcurrentDictionary<int, byte> refreshingRejectedDeviceTokens = new();
     private readonly ConcurrentDictionary<int, DateTime> lastRejectedTokenRefreshUtc = new();
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, byte>> rejectedDeviceTokens = new();
     private readonly ConcurrentQueue<PreviewBinding> capabilityDiscoveryQueue = new();
     private readonly ConcurrentDictionary<string, byte> queuedCapabilityDiscovery = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> attemptedCapabilityDiscovery = new(StringComparer.Ordinal);
@@ -4452,6 +4453,9 @@ public partial class MainWindow : Window
         lastRejectedTokenRefreshUtc[cmsDeviceId] = now;
         try
         {
+            ConcurrentDictionary<string, byte> rejected = rejectedDeviceTokens.GetOrAdd(
+                cmsDeviceId, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
+            rejected.TryAdd(device.AdminToken, 0);
             Log($"Autenticacao por token recusada no dispositivo {cmsDeviceId}; consultando uma vez o token atual da conta.");
             QrCloudApi.DeviceTokenResult result = await Task.Run(
                 () => QrCloudApi.QueryDeviceToken(cloudAccessToken, device.CloudId));
@@ -4460,9 +4464,14 @@ public partial class MainWindow : Window
                 Log($"A nuvem nao forneceu token renovado para o dispositivo {cmsDeviceId}; codigo {result.Code}. Nenhuma nova tentativa foi enviada.");
                 return;
             }
-            if (string.Equals(result.AdminToken, device.AdminToken, StringComparison.Ordinal))
+            string replacementToken = !rejected.ContainsKey(result.AdminToken)
+                ? result.AdminToken
+                : device.OldAdminToken.Length > 0 && !rejected.ContainsKey(device.OldAdminToken)
+                    ? device.OldAdminToken
+                    : string.Empty;
+            if (replacementToken.Length == 0)
             {
-                Log($"A nuvem devolveu para o dispositivo {cmsDeviceId} o mesmo token ja recusado. Nenhuma nova tentativa foi enviada.");
+                Log($"A nuvem nao forneceu ao dispositivo {cmsDeviceId} nenhum token ainda nao testado. Nenhuma nova tentativa foi enviada.");
                 return;
             }
 
@@ -4477,7 +4486,7 @@ public partial class MainWindow : Window
                     Log($"O cadastro local do dispositivo {cmsDeviceId} mudou durante a renovacao; operacao cancelada.");
                     return;
                 }
-                CmsSdk.SetAdminToken(ref existing, result.AdminToken);
+                CmsSdk.SetAdminToken(ref existing, replacementToken);
                 int edited = CmsSdk.CMS_Client_EditDevice(cmsDeviceId, ref existing);
                 if (edited != 0)
                 {
@@ -4485,7 +4494,7 @@ public partial class MainWindow : Window
                     return;
                 }
 
-                device.AdminToken = result.AdminToken;
+                device.AdminToken = replacementToken;
                 ResetDeviceRequestProtectionAfterTokenRefresh(device, cmsDeviceId);
                 automaticDeviceLoginResults.TryRemove(cmsDeviceId, out _);
                 int login = CmsSdk.CMS_Client_DeviceLoginOrLogout(cmsDeviceId, true);
@@ -8291,6 +8300,7 @@ public partial class MainWindow : Window
         automaticDeviceLoginResults.Clear();
         refreshingRejectedDeviceTokens.Clear();
         lastRejectedTokenRefreshUtc.Clear();
+        rejectedDeviceTokens.Clear();
         UpdateCameraSummary();
     }
 
@@ -8599,6 +8609,11 @@ public partial class MainWindow : Window
         {
             automaticDeviceLoginResults[p2] = p4;
             RecordDeviceRequestResult(p2, p4);
+            if (p4 > 0)
+            {
+                rejectedDeviceTokens.TryRemove(p2, out _);
+                lastRejectedTokenRefreshUtc.TryRemove(p2, out _);
+            }
             if (p2 == deviceId && p4 < 0)
                 previewLoginError = p4;
         }
